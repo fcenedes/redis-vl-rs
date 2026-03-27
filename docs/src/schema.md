@@ -72,6 +72,31 @@ let schema = IndexSchema::from_json_value(value).unwrap();
 | `distance_metric` | `cosine`, `l2`, `ip` | `cosine` |
 | `datatype` | `float32`, `float64` | `float32` |
 
+## Multi-prefix indexes
+
+An index can span multiple key prefixes:
+
+```yaml
+index:
+  name: multi-idx
+  prefix:
+    - products
+    - inventory
+fields:
+  - name: title
+    type: tag
+```
+
+```rust,no_run
+use redis_vl::IndexSchema;
+
+let schema = IndexSchema::from_json_value(serde_json::json!({
+    "index": { "name": "multi", "prefix": ["pfx_a", "pfx_b"] },
+    "fields": []
+})).unwrap();
+assert_eq!(schema.index.prefix.len(), 2);
+```
+
 ## Stopwords
 
 Custom stopwords can be configured at the index level:

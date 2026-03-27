@@ -174,7 +174,7 @@ impl SearchIndex {
 
     /// Returns the first (or only) key prefix.
     ///
-    /// For multi-prefix indexes, returns the first prefix. Use [`prefixes()`]
+    /// For multi-prefix indexes, returns the first prefix. Use [`Self::prefixes`]
     /// to access all configured prefixes.
     pub fn prefix(&self) -> &str {
         self.schema.index.prefix.first()
@@ -934,7 +934,7 @@ impl AsyncSearchIndex {
 
     /// Returns the first (or only) key prefix.
     ///
-    /// For multi-prefix indexes, returns the first prefix. Use [`prefixes()`]
+    /// For multi-prefix indexes, returns the first prefix. Use [`Self::prefixes`]
     /// to access all configured prefixes.
     pub fn prefix(&self) -> &str {
         self.schema.index.prefix.first()

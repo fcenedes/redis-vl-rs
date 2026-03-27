@@ -9,9 +9,14 @@
 | `TextQuery` | Full-text search with Redis Search syntax |
 | `FilterQuery` | Filter-only search (no scoring) |
 | `CountQuery` | Return only the count of matching documents |
+| `HybridQuery` | Combined text + vector search via `FT.HYBRID` (Redis 8.4+) |
+| `AggregateHybridQuery` | Text + vector fusion via `FT.AGGREGATE` |
+| `MultiVectorQuery` | Multi-vector aggregate search across multiple vector fields |
+| `SQLQuery` | SQL `SELECT` → Redis Search translation (behind `sql` feature) |
 
-> `HybridQuery`, `AggregateHybridQuery`, and `MultiVectorQuery` types exist
-> but runtime parity with the Python library is still in progress.
+> **Note:** `HybridQuery`, `AggregateHybridQuery`, and `MultiVectorQuery` have
+> full command builders but require Redis 8.4+ for `FT.HYBRID` / `FT.AGGREGATE`
+> support. End-to-end integration testing against Redis 8.4 is still in progress.
 
 ## Filter DSL
 
@@ -85,4 +90,38 @@ let queries = vec![
 ];
 let results = index.batch_search(queries.iter()).unwrap();
 ```
+
+## Hybrid queries (Redis 8.4+)
+
+`HybridQuery` combines text and vector search with configurable fusion:
+
+```rust,no_run
+use redis_vl::query::{HybridQuery, HybridCombinationMethod, Vector};
+
+let query = HybridQuery::new(
+    "medical professional",
+    "description",
+    Vector::new(vec![0.1, 0.1, 0.5]),
+    "user_embedding",
+)
+.with_num_results(10)
+.with_combination_method(HybridCombinationMethod::Rrf)
+.with_return_fields(["user", "age", "job"]);
+```
+
+## SQL queries
+
+`SQLQuery` (behind the `sql` feature flag) translates SQL `SELECT` statements
+into Redis Search queries:
+
+```rust,no_run
+use redis_vl::{SQLQuery, SqlParam};
+
+let query = SQLQuery::new("SELECT * FROM products WHERE category = 'electronics' AND price > :min")
+    .with_param("min", SqlParam::Float(99.99));
+```
+
+Supported SQL features: `WHERE` (comparisons, `IN`/`NOT IN`, `LIKE`, `BETWEEN`,
+`AND`/`OR`), `ORDER BY`, `LIMIT`/`OFFSET`, and field projection. Aggregate
+queries (`COUNT`, `GROUP BY`) are not yet supported.
 
