@@ -60,12 +60,24 @@ impl CohereRerankerConfig {
 
 const COHERE_RERANK_URL: &str = "https://api.cohere.com/v1/rerank";
 
-#[derive(Serialize)]
+/// Documents sent to the Cohere rerank API can be either plain strings or
+/// structured objects (maps of field→value). When `rank_fields` is provided,
+/// Cohere expects structured documents so it can rank by the specified fields.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+enum CohereDocument<'a> {
+    /// A plain text document.
+    Text(&'a str),
+    /// A structured document with named fields — sent as a JSON object.
+    Fields(std::collections::HashMap<&'a str, &'a str>),
+}
+
+#[derive(Debug, Serialize)]
 struct CohereRerankRequest<'a> {
     model: &'a str,
     query: &'a str,
     top_n: usize,
-    documents: Vec<&'a str>,
+    documents: Vec<CohereDocument<'a>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     rank_fields: Option<Vec<&'a str>>,
 }
@@ -101,23 +113,63 @@ impl CohereReranker {
         }
     }
 
-    fn prepare_texts<'a>(&'a self, docs: &'a [RerankDoc]) -> Vec<&'a str> {
-        docs.iter()
-            .filter_map(|d| match d {
-                RerankDoc::Text(s) => Some(s.as_str()),
-                RerankDoc::Fields(map) => {
-                    if self.config.rank_by.is_empty() {
-                        map.get("content").map(|s| s.as_str())
-                    } else {
-                        // For Cohere with rank_fields we send the raw text of the first field
-                        self.config
-                            .rank_by
-                            .first()
-                            .and_then(|k| map.get(k).map(|s| s.as_str()))
+    /// Builds the request body matching the upstream Python `CohereReranker._preprocess` contract:
+    ///
+    /// - **String docs**: sent as plain strings, no `rank_fields`.
+    /// - **Dict docs + `rank_by`**: sent as structured JSON objects with `rank_fields` set.
+    /// - **Dict docs without `rank_by`**: returns `InvalidInput` error (matches Python `ValueError`).
+    fn prepare_request<'a>(
+        &'a self,
+        query: &'a str,
+        docs: &'a [RerankDoc],
+        limit: Option<usize>,
+    ) -> Result<CohereRerankRequest<'a>> {
+        let all_fields = docs.iter().all(|d| matches!(d, RerankDoc::Fields(_)));
+
+        let (documents, rank_fields) = if all_fields {
+            // Dict-style docs: must have rank_by, send structured documents + rank_fields
+            if self.config.rank_by.is_empty() {
+                return Err(crate::error::Error::InvalidInput(
+                    "If reranking dictionary-like docs, you must provide a list of rank_by fields"
+                        .into(),
+                ));
+            }
+            let structured: Vec<CohereDocument<'a>> = docs
+                .iter()
+                .map(|d| match d {
+                    RerankDoc::Fields(map) => {
+                        let obj: std::collections::HashMap<&str, &str> =
+                            map.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+                        CohereDocument::Fields(obj)
                     }
-                }
-            })
-            .collect()
+                    // unreachable given `all_fields` guard, but handle gracefully
+                    RerankDoc::Text(s) => CohereDocument::Text(s.as_str()),
+                })
+                .collect();
+            let rf: Vec<&str> = self.config.rank_by.iter().map(|s| s.as_str()).collect();
+            (structured, Some(rf))
+        } else {
+            // String docs (or mixed): flatten to plain text, no rank_fields
+            let plain: Vec<CohereDocument<'a>> = docs
+                .iter()
+                .filter_map(|d| match d {
+                    RerankDoc::Text(s) => Some(CohereDocument::Text(s.as_str())),
+                    RerankDoc::Fields(map) => {
+                        map.get("content").map(|s| CohereDocument::Text(s.as_str()))
+                    }
+                })
+                .collect();
+            (plain, None)
+        };
+
+        let top_n = limit.unwrap_or(documents.len());
+        Ok(CohereRerankRequest {
+            model: &self.config.model,
+            query,
+            top_n,
+            documents,
+            rank_fields,
+        })
     }
 
     fn build_result(&self, docs: &[RerankDoc], response: CohereRerankResponse) -> RerankResult {
@@ -142,19 +194,12 @@ impl CohereReranker {
 
 impl Reranker for CohereReranker {
     fn rank(&self, query: &str, docs: &[RerankDoc], limit: Option<usize>) -> Result<RerankResult> {
-        let texts = self.prepare_texts(docs);
-        let top_n = limit.unwrap_or(texts.len());
+        let request = self.prepare_request(query, docs, limit)?;
         let resp: CohereRerankResponse = self
             .blocking_client
             .post(COHERE_RERANK_URL)
             .bearer_auth(&self.config.api_key)
-            .json(&CohereRerankRequest {
-                model: &self.config.model,
-                query,
-                top_n,
-                documents: texts,
-                rank_fields: None,
-            })
+            .json(&request)
             .send()?
             .error_for_status()?
             .json()?;
@@ -170,19 +215,12 @@ impl AsyncReranker for CohereReranker {
         docs: &[RerankDoc],
         limit: Option<usize>,
     ) -> Result<RerankResult> {
-        let texts = self.prepare_texts(docs);
-        let top_n = limit.unwrap_or(texts.len());
+        let request = self.prepare_request(query, docs, limit)?;
         let resp: CohereRerankResponse = self
             .client
             .post(COHERE_RERANK_URL)
             .bearer_auth(&self.config.api_key)
-            .json(&CohereRerankRequest {
-                model: &self.config.model,
-                query,
-                top_n,
-                documents: texts,
-                rank_fields: None,
-            })
+            .json(&request)
             .send()
             .await?
             .error_for_status()?
@@ -261,15 +299,76 @@ mod tests {
     }
 
     #[test]
-    fn cohere_reranker_prepare_texts_plain() {
+    fn prepare_request_string_docs_sends_plain_text_no_rank_fields() {
         let cfg = CohereRerankerConfig::new("key");
         let reranker = CohereReranker::new(cfg);
         let docs = vec![
             RerankDoc::Text("doc1".into()),
             RerankDoc::Text("doc2".into()),
         ];
-        let texts = reranker.prepare_texts(&docs);
-        assert_eq!(texts, vec!["doc1", "doc2"]);
+        let req = reranker.prepare_request("query", &docs, Some(2)).unwrap();
+        assert!(req.rank_fields.is_none());
+        assert_eq!(req.documents.len(), 2);
+        assert_eq!(req.top_n, 2);
+        // Verify they serialize as plain strings
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["documents"], serde_json::json!(["doc1", "doc2"]));
+        // rank_fields is omitted from JSON when None (skip_serializing_if)
+        assert!(json.get("rank_fields").is_none());
+    }
+
+    #[test]
+    fn prepare_request_dict_docs_with_rank_by_sends_structured_plus_rank_fields() {
+        let cfg = CohereRerankerConfig::new("key").rank_by(vec!["content".into()]);
+        let reranker = CohereReranker::new(cfg);
+        let mut map1 = std::collections::HashMap::new();
+        map1.insert("content".to_string(), "document 1".to_string());
+        let mut map2 = std::collections::HashMap::new();
+        map2.insert("content".to_string(), "document 2".to_string());
+        let docs = vec![RerankDoc::Fields(map1), RerankDoc::Fields(map2)];
+
+        let req = reranker.prepare_request("query", &docs, None).unwrap();
+        assert_eq!(req.rank_fields, Some(vec!["content"]));
+        assert_eq!(req.documents.len(), 2);
+        // Verify they serialize as JSON objects
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(
+            json["documents"][0]["content"],
+            serde_json::json!("document 1")
+        );
+        assert_eq!(json["rank_fields"], serde_json::json!(["content"]));
+    }
+
+    #[test]
+    fn prepare_request_dict_docs_without_rank_by_errors_like_python() {
+        // Python raises ValueError: "If reranking dictionary-like docs, you must provide
+        // a list of rank_by fields"
+        let cfg = CohereRerankerConfig::new("key"); // rank_by is empty
+        let reranker = CohereReranker::new(cfg);
+        let mut map = std::collections::HashMap::new();
+        map.insert("content".to_string(), "doc".to_string());
+        let docs = vec![RerankDoc::Fields(map)];
+
+        let err = reranker.prepare_request("query", &docs, None);
+        assert!(err.is_err());
+        let msg = err.unwrap_err().to_string();
+        assert!(
+            msg.contains("rank_by"),
+            "Error should mention rank_by: {msg}"
+        );
+    }
+
+    #[test]
+    fn prepare_request_limit_defaults_to_doc_count() {
+        let cfg = CohereRerankerConfig::new("key");
+        let reranker = CohereReranker::new(cfg);
+        let docs = vec![
+            RerankDoc::Text("a".into()),
+            RerankDoc::Text("b".into()),
+            RerankDoc::Text("c".into()),
+        ];
+        let req = reranker.prepare_request("q", &docs, None).unwrap();
+        assert_eq!(req.top_n, 3);
     }
 
     #[test]
