@@ -7,6 +7,26 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 
+#[cfg(feature = "azure-openai")]
+mod azure_openai;
+#[cfg(feature = "azure-openai")]
+pub use azure_openai::{AzureOpenAIConfig, AzureOpenAITextVectorizer};
+
+#[cfg(feature = "cohere")]
+mod cohere;
+#[cfg(feature = "cohere")]
+pub use self::cohere::{CohereConfig, CohereTextVectorizer};
+
+#[cfg(feature = "mistral")]
+mod mistral;
+#[cfg(feature = "mistral")]
+pub use self::mistral::{MistralAITextVectorizer, MistralConfig};
+
+#[cfg(feature = "voyageai")]
+mod voyageai;
+#[cfg(feature = "voyageai")]
+pub use self::voyageai::{VoyageAIConfig, VoyageAITextVectorizer};
+
 /// Shared embedding request payload.
 #[derive(Debug, Clone, Serialize)]
 pub struct EmbeddingRequest<'a> {
@@ -231,11 +251,11 @@ where
 }
 
 #[derive(Debug, Deserialize)]
-struct EmbeddingResponse {
-    data: Vec<EmbeddingDatum>,
+pub(crate) struct EmbeddingResponse {
+    pub(crate) data: Vec<EmbeddingDatum>,
 }
 
 #[derive(Debug, Deserialize)]
-struct EmbeddingDatum {
-    embedding: Vec<f32>,
+pub(crate) struct EmbeddingDatum {
+    pub(crate) embedding: Vec<f32>,
 }

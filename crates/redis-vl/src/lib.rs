@@ -13,6 +13,8 @@ pub mod filter;
 pub mod index;
 /// Query builders and vector payload helpers.
 pub mod query;
+/// Reranker abstractions and provider adapters.
+pub mod rerankers;
 /// Schema types and Redis Search schema serialization.
 pub mod schema;
 /// Embedding provider abstractions and adapters.
@@ -36,6 +38,9 @@ pub use query::{
     QueryRender, QueryString, SortBy, SortDirection, TextQuery, Vector, VectorQuery,
     VectorRangeQuery, VectorSearchMethod,
 };
+pub use rerankers::{AsyncReranker, RerankDoc, RerankResult, Reranker};
+#[cfg(feature = "rerankers")]
+pub use rerankers::{CohereReranker, CohereRerankerConfig};
 pub use schema::{
     Field, FieldKind, GeoFieldAttributes, IndexDefinition, IndexSchema, NumericFieldAttributes,
     Prefix, StorageType, TagFieldAttributes, TextFieldAttributes, TimestampFieldAttributes,
@@ -45,3 +50,11 @@ pub use vectorizers::{
     AsyncVectorizer, CustomTextVectorizer, EmbeddingRequest, LiteLLMTextVectorizer,
     OpenAICompatibleConfig, OpenAITextVectorizer, Vectorizer,
 };
+#[cfg(feature = "azure-openai")]
+pub use vectorizers::{AzureOpenAIConfig, AzureOpenAITextVectorizer};
+#[cfg(feature = "cohere")]
+pub use vectorizers::{CohereConfig, CohereTextVectorizer};
+#[cfg(feature = "mistral")]
+pub use vectorizers::{MistralAITextVectorizer, MistralConfig};
+#[cfg(feature = "voyageai")]
+pub use vectorizers::{VoyageAIConfig, VoyageAITextVectorizer};
