@@ -767,6 +767,20 @@ impl SearchIndex {
         Ok(QueryOutput::Documents(documents))
     }
 
+    /// Executes a [`MultiVectorQuery`] via `FT.AGGREGATE` and returns
+    /// processed documents.
+    pub fn multi_vector_query(
+        &self,
+        query: &crate::query::MultiVectorQuery<'_>,
+    ) -> Result<QueryOutput> {
+        let client = self.connection.client()?;
+        let mut connection = client.get_connection()?;
+        let cmd = query.build_aggregate_cmd(self.name());
+        let value: redis::Value = cmd.query(&mut connection)?;
+        let documents = parse_aggregate_result(value)?;
+        Ok(QueryOutput::Documents(documents))
+    }
+
     /// Constructs a [`SearchIndex`] from an existing Redis index by reading
     /// `FT.INFO` and reconstructing the schema.
     ///
@@ -1485,6 +1499,20 @@ impl AsyncSearchIndex {
     pub async fn aggregate_query(
         &self,
         query: &crate::query::AggregateHybridQuery<'_>,
+    ) -> Result<QueryOutput> {
+        let client = self.connection.client()?;
+        let mut connection = client.get_multiplexed_async_connection().await?;
+        let cmd = query.build_aggregate_cmd(self.name());
+        let value: redis::Value = cmd.query_async(&mut connection).await?;
+        let documents = parse_aggregate_result(value)?;
+        Ok(QueryOutput::Documents(documents))
+    }
+
+    /// Executes a [`MultiVectorQuery`] asynchronously via `FT.AGGREGATE` and
+    /// returns processed documents.
+    pub async fn multi_vector_query(
+        &self,
+        query: &crate::query::MultiVectorQuery<'_>,
     ) -> Result<QueryOutput> {
         let client = self.connection.client()?;
         let mut connection = client.get_multiplexed_async_connection().await?;

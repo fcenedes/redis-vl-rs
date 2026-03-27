@@ -35,8 +35,8 @@ pub use index::{
 pub use query::{
     AggregateHybridQuery, CountQuery, FilterQuery, HybridCombinationMethod, HybridQuery,
     MultiVectorQuery, PageableQuery, QueryKind, QueryLimit, QueryParam, QueryParamValue,
-    QueryRender, QueryString, SortBy, SortDirection, TextQuery, Vector, VectorQuery,
-    VectorRangeQuery, VectorSearchMethod,
+    QueryRender, QueryString, SortBy, SortDirection, TextQuery, Vector, VectorDtype, VectorInput,
+    VectorQuery, VectorRangeQuery, VectorSearchMethod,
 };
 pub use rerankers::{AsyncReranker, RerankDoc, RerankResult, Reranker};
 #[cfg(feature = "rerankers")]

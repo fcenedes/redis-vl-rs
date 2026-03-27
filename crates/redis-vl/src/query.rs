@@ -1386,58 +1386,271 @@ impl<'a> AggregateHybridQuery<'a> {
     }
 }
 
-/// Weighted multi-vector query.
+/// Supported vector data types for multi-vector queries.
+///
+/// Mirrors the Python `Vector.dtype` field.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VectorDtype {
+    /// Brain floating-point 16-bit.
+    BFloat16,
+    /// IEEE 754 half-precision 16-bit.
+    Float16,
+    /// IEEE 754 single-precision 32-bit (default).
+    Float32,
+    /// IEEE 754 double-precision 64-bit.
+    Float64,
+    /// Signed 8-bit integer.
+    Int8,
+    /// Unsigned 8-bit integer.
+    Uint8,
+}
+
+impl Default for VectorDtype {
+    fn default() -> Self {
+        Self::Float32
+    }
+}
+
+impl VectorDtype {
+    /// Bytes per element for this dtype.
+    pub fn bytes_per_element(self) -> usize {
+        match self {
+            Self::BFloat16 | Self::Float16 => 2,
+            Self::Float32 => 4,
+            Self::Float64 => 8,
+            Self::Int8 | Self::Uint8 => 1,
+        }
+    }
+}
+
+/// A single vector input for [`MultiVectorQuery`].
+///
+/// Mirrors the Python `Vector` dataclass from `redisvl.query.aggregate`.
+/// Each input carries its own field name, weight, data type, and optional
+/// maximum distance threshold.
+#[derive(Debug, Clone)]
+pub struct VectorInput<'a> {
+    /// The encoded vector bytes.
+    pub vector: Cow<'a, [u8]>,
+    /// Redis field name this vector targets.
+    pub field_name: String,
+    /// Weight applied when computing the combined score.
+    pub weight: f32,
+    /// Data type of the vector elements.
+    pub dtype: VectorDtype,
+    /// Maximum cosine distance threshold for range filtering (0.0–2.0).
+    pub max_distance: f32,
+}
+
+impl<'a> VectorInput<'a> {
+    /// Creates a vector input from float elements, encoding them as float32
+    /// bytes.
+    pub fn from_floats(elements: &[f32], field_name: impl Into<String>) -> Self {
+        let mut buf = Vec::with_capacity(elements.len() * std::mem::size_of::<f32>());
+        for &v in elements {
+            buf.extend_from_slice(&v.to_le_bytes());
+        }
+        Self {
+            vector: Cow::Owned(buf),
+            field_name: field_name.into(),
+            weight: 1.0,
+            dtype: VectorDtype::Float32,
+            max_distance: 2.0,
+        }
+    }
+
+    /// Creates a vector input from pre-encoded bytes.
+    pub fn from_bytes(
+        bytes: impl Into<Cow<'a, [u8]>>,
+        field_name: impl Into<String>,
+        dtype: VectorDtype,
+    ) -> Self {
+        Self {
+            vector: bytes.into(),
+            field_name: field_name.into(),
+            weight: 1.0,
+            dtype,
+            max_distance: 2.0,
+        }
+    }
+
+    /// Sets the weight for this vector.
+    pub fn with_weight(mut self, weight: f32) -> Self {
+        self.weight = weight;
+        self
+    }
+
+    /// Sets the data type.
+    pub fn with_dtype(mut self, dtype: VectorDtype) -> Self {
+        self.dtype = dtype;
+        self
+    }
+
+    /// Sets the maximum distance threshold (must be in 0.0–2.0).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_distance` is outside the valid range.
+    pub fn with_max_distance(mut self, max_distance: f32) -> Self {
+        assert!(
+            (0.0..=2.0).contains(&max_distance),
+            "max_distance must be in [0.0, 2.0], got {}",
+            max_distance
+        );
+        self.max_distance = max_distance;
+        self
+    }
+}
+
+/// Weighted multi-vector query using `FT.AGGREGATE` with per-vector range
+/// searches.
+///
+/// Mirrors the Python `MultiVectorQuery` which composes multiple
+/// `VECTOR_RANGE` clauses and computes a weighted `combined_score` via
+/// `APPLY` steps.
 #[derive(Debug, Clone)]
 pub struct MultiVectorQuery<'a> {
-    vectors: Vec<Vector<'a>>,
-    vector_field_name: String,
-    weights: Vec<f32>,
+    vectors: Vec<VectorInput<'a>>,
+    filter_expression: Option<FilterExpression>,
+    num_results: usize,
+    return_fields: Vec<String>,
+    dialect: u32,
 }
 
 impl<'a> MultiVectorQuery<'a> {
-    /// Creates a multi-vector query.
-    pub fn new(
-        vectors: Vec<Vector<'a>>,
-        vector_field_name: impl Into<String>,
-        weights: Vec<f32>,
-    ) -> Self {
+    /// Creates a multi-vector query from one or more [`VectorInput`]s.
+    pub fn new(vectors: Vec<VectorInput<'a>>) -> Self {
         Self {
             vectors,
-            vector_field_name: vector_field_name.into(),
-            weights,
+            filter_expression: None,
+            num_results: 10,
+            return_fields: Vec::new(),
+            dialect: 2,
         }
     }
 
-    /// Returns the vectors used by the query.
-    pub fn vectors(&self) -> &[Vector<'a>] {
+    /// Sets the number of results to return.
+    pub fn with_num_results(mut self, num_results: usize) -> Self {
+        self.num_results = num_results;
+        self
+    }
+
+    /// Attaches a filter expression.
+    pub fn with_filter(mut self, filter: FilterExpression) -> Self {
+        self.filter_expression = Some(filter);
+        self
+    }
+
+    /// Replaces the return field list.
+    pub fn with_return_fields<I, S>(mut self, fields: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.return_fields = fields.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Sets the Redis dialect version.
+    pub fn with_dialect(mut self, dialect: u32) -> Self {
+        self.dialect = dialect;
+        self
+    }
+
+    /// Returns the vector inputs used by the query.
+    pub fn vectors(&self) -> &[VectorInput<'a>] {
         &self.vectors
     }
-}
 
-impl QueryString for MultiVectorQuery<'_> {
-    fn to_redis_query(&self) -> String {
-        let weights = self
-            .weights
-            .iter()
-            .map(|weight| weight.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        format!(
-            "*=>[MULTI_KNN @{} $vectors WEIGHTS {}]",
-            self.vector_field_name, weights
-        )
-    }
-
-    fn params(&self) -> Vec<QueryParam> {
-        let mut buffer = Vec::new();
-        for vector in &self.vectors {
-            buffer.extend_from_slice(vector.to_bytes().as_ref());
+    /// Builds the FT.AGGREGATE query string.
+    ///
+    /// Mirrors the Python `MultiVectorQuery.__str__()` output:
+    /// ```text
+    /// @field_0:[VECTOR_RANGE max_dist_0 $vector_0]=>{$YIELD_DISTANCE_AS: distance_0}
+    ///   AND @field_1:[VECTOR_RANGE max_dist_1 $vector_1]=>{$YIELD_DISTANCE_AS: distance_1}
+    /// ```
+    pub fn build_query_string(&self) -> String {
+        let mut parts = Vec::with_capacity(self.vectors.len());
+        for (i, vi) in self.vectors.iter().enumerate() {
+            parts.push(format!(
+                "@{}:[VECTOR_RANGE {} $vector_{}]=>{{$YIELD_DISTANCE_AS: distance_{}}}",
+                vi.field_name, vi.max_distance, i, i
+            ));
         }
 
-        vec![QueryParam {
-            name: "vectors".to_owned(),
-            value: QueryParamValue::Binary(buffer),
-        }]
+        let base = parts.join(" AND ");
+
+        if let Some(filter) = &self.filter_expression {
+            let filter_str = filter.to_redis_syntax();
+            if filter_str != "*" {
+                format!("({}) {}", filter_str, base)
+            } else {
+                base
+            }
+        } else {
+            base
+        }
+    }
+
+    /// Builds the complete `FT.AGGREGATE` command.
+    pub fn build_aggregate_cmd(&self, index_name: &str) -> redis::Cmd {
+        let query_string = self.build_query_string();
+        let mut cmd = redis::cmd("FT.AGGREGATE");
+        cmd.arg(index_name);
+        cmd.arg(&query_string);
+
+        // SCORER TFIDF (matches Python default)
+        cmd.arg("SCORER").arg("TFIDF");
+
+        // DIALECT
+        cmd.arg("DIALECT").arg(self.dialect);
+
+        // APPLY: compute score_i = (2 - distance_i) / 2 for each vector
+        for i in 0..self.vectors.len() {
+            cmd.arg("APPLY")
+                .arg(format!("(2 - @distance_{})/2", i))
+                .arg("AS")
+                .arg(format!("score_{}", i));
+        }
+
+        // APPLY: combined_score = sum(score_i * weight_i)
+        let combined_expr: Vec<String> = self
+            .vectors
+            .iter()
+            .enumerate()
+            .map(|(i, vi)| format!("@score_{} * {}", i, vi.weight))
+            .collect();
+        cmd.arg("APPLY")
+            .arg(combined_expr.join(" + "))
+            .arg("AS")
+            .arg("combined_score");
+
+        // SORTBY by combined_score DESC
+        cmd.arg("SORTBY")
+            .arg(2)
+            .arg("@combined_score")
+            .arg("DESC")
+            .arg("MAX")
+            .arg(self.num_results);
+
+        // LOAD return fields
+        if !self.return_fields.is_empty() {
+            cmd.arg("LOAD");
+            cmd.arg(self.return_fields.len());
+            for field in &self.return_fields {
+                cmd.arg(format!("@{}", field));
+            }
+        }
+
+        // PARAMS for vector blobs
+        let param_count = self.vectors.len() * 2;
+        cmd.arg("PARAMS").arg(param_count);
+        for (i, vi) in self.vectors.iter().enumerate() {
+            cmd.arg(format!("vector_{}", i));
+            cmd.arg(vi.vector.as_ref());
+        }
+
+        cmd
     }
 }
 
@@ -1485,10 +1698,10 @@ impl QueryString for SQLQuery {
 mod tests {
     use super::{
         AggregateHybridQuery, CountQuery, FilterQuery, HybridCombinationMethod, HybridQuery,
-        PageableQuery, QueryString, SortDirection, TextQuery, Vector, VectorQuery,
-        VectorRangeQuery,
+        MultiVectorQuery, PageableQuery, QueryString, SortDirection, TextQuery, Vector,
+        VectorDtype, VectorInput, VectorQuery, VectorRangeQuery,
     };
-    use crate::filter::{Num, Tag};
+    use crate::filter::{Num, Tag, Text};
 
     #[test]
     fn vector_query_should_render_knn() {
@@ -1853,5 +2066,458 @@ mod tests {
         query2.set_text_weights(weights);
 
         assert_eq!(query1.build_query_string(), query2.build_query_string());
+    }
+
+    // ---------------------------------------------------------------
+    // Multi-vector query parity tests
+    // Mirrors: tests/unit/test_aggregation_types.py
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn multi_vector_query_should_build_vector_range_query_like_python() {
+        // Mirrors: test_multi_vector_query_string
+        let v1 = VectorInput::from_floats(&[0.1, 0.2, 0.3, 0.4], "text embedding")
+            .with_weight(0.2)
+            .with_max_distance(0.7);
+        let v2 = VectorInput::from_floats(&[0.5, 0.5], "image embedding")
+            .with_weight(0.7)
+            .with_max_distance(1.8);
+
+        let query = MultiVectorQuery::new(vec![v1, v2]);
+        let qs = query.build_query_string();
+
+        assert!(qs.contains("@text embedding:[VECTOR_RANGE 0.7 $vector_0]"));
+        assert!(qs.contains("YIELD_DISTANCE_AS: distance_0"));
+        assert!(qs.contains("@image embedding:[VECTOR_RANGE 1.8 $vector_1]"));
+        assert!(qs.contains("YIELD_DISTANCE_AS: distance_1"));
+        assert!(qs.contains("AND"));
+    }
+
+    #[test]
+    fn multi_vector_query_default_properties_like_python() {
+        // Mirrors: test_multi_vector_query default property checks
+        let vi = VectorInput::from_floats(&[0.1, 0.2, 0.3, 0.4], "field_1");
+        assert_eq!(vi.weight, 1.0);
+        assert_eq!(vi.dtype, VectorDtype::Float32);
+        assert_eq!(vi.max_distance, 2.0);
+
+        let query = MultiVectorQuery::new(vec![vi]);
+        assert!(query.filter_expression.is_none());
+        assert_eq!(query.num_results, 10);
+        assert!(query.return_fields.is_empty());
+        assert_eq!(query.dialect, 2);
+    }
+
+    #[test]
+    fn multi_vector_query_should_accept_multiple_vectors_like_python() {
+        // Mirrors: test_multi_vector_query with multiple vectors
+        let v1 = VectorInput::from_floats(&[0.1, 0.2, 0.3, 0.4], "field_1")
+            .with_weight(0.2)
+            .with_max_distance(2.0);
+        let v2 = VectorInput::from_floats(&[0.1, 0.2, 0.3, 0.4], "field_2")
+            .with_weight(0.5)
+            .with_max_distance(1.5);
+        let v3 = VectorInput::from_floats(&[0.5, 0.5], "field_3")
+            .with_weight(0.6)
+            .with_max_distance(0.4);
+        let v4 = VectorInput::from_floats(&[0.1, 0.1, 0.1], "field_4")
+            .with_weight(0.1)
+            .with_max_distance(0.01);
+
+        let query = MultiVectorQuery::new(vec![v1, v2, v3, v4]);
+        assert_eq!(query.vectors().len(), 4);
+    }
+
+    #[test]
+    fn multi_vector_query_overrides_like_python() {
+        // Mirrors: test_multi_vector_query defaults can be overwritten
+        let vi = VectorInput::from_floats(&[0.1, 0.2], "field_1");
+        let filter = Tag::new("user group").one_of(["group A", "group C"]);
+
+        let query = MultiVectorQuery::new(vec![vi])
+            .with_filter(filter)
+            .with_num_results(5)
+            .with_return_fields(["field_1", "user name", "address"])
+            .with_dialect(4);
+
+        assert!(query.filter_expression.is_some());
+        assert_eq!(query.num_results, 5);
+        assert_eq!(query.return_fields, vec!["field_1", "user name", "address"]);
+        assert_eq!(query.dialect, 4);
+    }
+
+    #[test]
+    fn multi_vector_query_aggregate_cmd_like_python() {
+        // Mirrors: test_multi_vector_query_string aggregate command structure
+        let v1 = VectorInput::from_floats(&[0.1, 0.2, 0.3, 0.4], "text embedding")
+            .with_weight(0.2)
+            .with_max_distance(0.7);
+        let v2 = VectorInput::from_floats(&[0.5, 0.5], "image embedding")
+            .with_weight(0.7)
+            .with_max_distance(1.8);
+
+        let query = MultiVectorQuery::new(vec![v1, v2]);
+        let cmd = query.build_aggregate_cmd("my_index");
+        let packed = cmd.get_packed_command();
+        let cmd_str = String::from_utf8_lossy(&packed);
+
+        assert!(cmd_str.contains("FT.AGGREGATE"));
+        assert!(cmd_str.contains("my_index"));
+        assert!(cmd_str.contains("SCORER"));
+        assert!(cmd_str.contains("TFIDF"));
+        assert!(cmd_str.contains("score_0"));
+        assert!(cmd_str.contains("score_1"));
+        assert!(cmd_str.contains("combined_score"));
+        assert!(cmd_str.contains("SORTBY"));
+        assert!(cmd_str.contains("PARAMS"));
+    }
+
+    #[test]
+    fn multi_vector_query_with_filter_like_python() {
+        // Mirrors: test_multivector_query_with_filter (text filter)
+        let v1 = VectorInput::from_floats(&[0.1, 0.1, 0.5], "user_embedding");
+        let v2 = VectorInput::from_floats(&[0.3, 0.4, 0.7, 0.2, -0.3], "image_embedding");
+        let filter = Text::new("description").eq("medical");
+
+        let query = MultiVectorQuery::new(vec![v1, v2]).with_filter(filter);
+
+        let qs = query.build_query_string();
+        assert!(qs.contains("@description"));
+        assert!(qs.contains("medical"));
+    }
+
+    #[test]
+    #[should_panic(expected = "max_distance must be in [0.0, 2.0]")]
+    fn vector_input_should_reject_invalid_max_distance_like_python() {
+        // Mirrors: test_vector_object_validation max_distance bounds
+        VectorInput::from_floats(&[0.1, 0.2], "field").with_max_distance(2.001);
+    }
+
+    #[test]
+    #[should_panic(expected = "max_distance must be in [0.0, 2.0]")]
+    fn vector_input_should_reject_negative_max_distance_like_python() {
+        // Mirrors: test_vector_object_validation negative distance
+        VectorInput::from_floats(&[0.1, 0.2], "field").with_max_distance(-0.1);
+    }
+
+    #[test]
+    fn vector_input_from_bytes_like_python() {
+        // Mirrors: test_vector_object_handles_byte_conversion
+        let floats = [0.1_f32, 0.2, 0.3, 0.4];
+        let mut expected_bytes = Vec::new();
+        for &f in &floats {
+            expected_bytes.extend_from_slice(&f.to_le_bytes());
+        }
+        let vi = VectorInput::from_floats(&floats, "field_1");
+        assert_eq!(vi.vector.as_ref(), expected_bytes.as_slice());
+
+        // Also test from pre-encoded bytes
+        let vi2 = VectorInput::from_bytes(expected_bytes.clone(), "field_1", VectorDtype::Float32);
+        assert_eq!(vi2.vector.as_ref(), expected_bytes.as_slice());
+    }
+
+    // ---------------------------------------------------------------
+    // AggregateHybridQuery parity: empty-text, stopwords, filter
+    // Mirrors: tests/unit/test_aggregation_types.py
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn aggregate_hybrid_query_reject_stopword_only_text_like_python() {
+        // Mirrors: test_empty_query_string – text that becomes empty after
+        // default stopword removal. Our Rust impl currently only checks raw
+        // empty text; full default-stopword removal is a known gap.
+        let result = AggregateHybridQuery::new(
+            "",
+            "description",
+            Vector::new(vec![0.1, 0.1, 0.5]),
+            "user_embedding",
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn aggregate_hybrid_query_with_string_filter_like_python() {
+        // Mirrors: test_hybrid_query_with_string_filter
+        // Using a raw string filter should be included in the query string.
+        use crate::filter::FilterExpression;
+        let filter_str = "@category:{tech|science|engineering}";
+        let filter = FilterExpression::raw(filter_str);
+
+        let query = AggregateHybridQuery::new(
+            "search for document 12345",
+            "description",
+            Vector::new(vec![0.1, 0.2, 0.3, 0.4]),
+            "embedding",
+        )
+        .unwrap()
+        .with_filter(filter);
+
+        let qs = query.build_query_string();
+        assert!(qs.contains("@description:(search for document 12345)"));
+        assert!(qs.contains("@category:{tech|science|engineering}"));
+    }
+
+    #[test]
+    fn aggregate_hybrid_query_wildcard_filter_is_ignored_like_python() {
+        // Mirrors: test_hybrid_query_with_string_filter – wildcard filter
+        use crate::filter::FilterExpression;
+        let filter = FilterExpression::raw("*");
+
+        let query = AggregateHybridQuery::new(
+            "search text",
+            "description",
+            Vector::new(vec![0.1]),
+            "embedding",
+        )
+        .unwrap()
+        .with_filter(filter);
+
+        let qs = query.build_query_string();
+        assert!(!qs.contains("AND"));
+    }
+
+    #[test]
+    fn aggregate_hybrid_query_text_weights_validation_like_python() {
+        // Mirrors: test_aggregate_hybrid_query_text_weights_validation
+        // Empty weights and None should be allowed
+        use std::collections::HashMap;
+
+        let q1 = AggregateHybridQuery::new(
+            "sample text query",
+            "description",
+            Vector::new(vec![0.1, 0.2, 0.3, 0.4]),
+            "embedding",
+        )
+        .unwrap()
+        .with_text_weights(HashMap::new());
+        assert!(q1.build_query_string().contains("sample"));
+
+        // Weights for words not in the query should still work
+        let mut weights = HashMap::new();
+        weights.insert("alpha".to_owned(), 0.2_f32);
+        weights.insert("bravo".to_owned(), 0.4_f32);
+        let q2 = AggregateHybridQuery::new(
+            "sample text query",
+            "description",
+            Vector::new(vec![0.1, 0.2, 0.3, 0.4]),
+            "embedding",
+        )
+        .unwrap()
+        .with_text_weights(weights);
+        // The weights for non-present words should not cause errors
+        let qs = q2.build_query_string();
+        assert!(qs.contains("sample"));
+    }
+
+    // ---------------------------------------------------------------
+    // HybridQuery parity: vector search methods, filters, edge cases
+    // Mirrors: tests/unit/test_hybrid_types.py
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn hybrid_query_without_filter_like_python() {
+        // Mirrors: test_hybrid_query_without_filter
+        let query = HybridQuery::new(
+            "test query",
+            "description",
+            Vector::new(vec![0.1, 0.2, 0.3, 0.4]),
+            "embedding",
+        );
+
+        let cmd = query.build_cmd("idx");
+        let packed = cmd.get_packed_command();
+        let cmd_str = String::from_utf8_lossy(&packed);
+
+        // No FILTER should appear
+        assert!(!cmd_str.contains("FILTER"));
+        assert!(cmd_str.contains("@description:(test query)"));
+    }
+
+    #[test]
+    fn hybrid_query_vector_search_method_knn_like_python() {
+        // Mirrors: test_hybrid_query_vector_search_method_knn
+        let query = HybridQuery::new(
+            "test query",
+            "description",
+            Vector::new(vec![0.1, 0.2, 0.3, 0.4]),
+            "embedding",
+        )
+        .with_knn(Some(100))
+        .with_num_results(10);
+
+        let cmd = query.build_cmd("idx");
+        let packed = cmd.get_packed_command();
+        let cmd_str = String::from_utf8_lossy(&packed);
+
+        assert!(cmd_str.contains("KNN"));
+        assert!(cmd_str.contains("EF_RUNTIME"));
+    }
+
+    #[test]
+    fn hybrid_query_vector_search_method_range_like_python() {
+        // Mirrors: test_hybrid_query_vector_search_method_range
+        let query = HybridQuery::new(
+            "test query",
+            "description",
+            Vector::new(vec![0.1, 0.2, 0.3, 0.4]),
+            "embedding",
+        )
+        .with_range(10.0, Some(0.1));
+
+        let cmd = query.build_cmd("idx");
+        let packed = cmd.get_packed_command();
+        let cmd_str = String::from_utf8_lossy(&packed);
+
+        assert!(cmd_str.contains("RANGE"));
+        assert!(cmd_str.contains("RADIUS"));
+        assert!(cmd_str.contains("EPSILON"));
+    }
+
+    #[test]
+    fn hybrid_query_without_vector_search_method_like_python() {
+        // Mirrors: test_hybrid_query_vector_search_method_none
+        let query = HybridQuery::new(
+            "test query",
+            "description",
+            Vector::new(vec![0.1, 0.2, 0.3, 0.4]),
+            "embedding",
+        );
+
+        let cmd = query.build_cmd("idx");
+        let packed = cmd.get_packed_command();
+        let cmd_str = String::from_utf8_lossy(&packed);
+
+        assert!(cmd_str.contains("VSIM"));
+        // No explicit KNN or RANGE
+        assert!(!cmd_str.contains("KNN"));
+        assert!(!cmd_str.contains("RANGE"));
+    }
+
+    #[test]
+    fn hybrid_query_rrf_with_both_params_like_python() {
+        // Mirrors: test_hybrid_query_combination_method_rrf_with_both_params
+        let query = HybridQuery::new(
+            "test query",
+            "description",
+            Vector::new(vec![0.1, 0.2, 0.3, 0.4]),
+            "embedding",
+        )
+        .with_rrf(Some(20), Some(50))
+        .with_yield_combined_score_as("rrf_score");
+
+        let cmd = query.build_cmd("idx");
+        let packed = cmd.get_packed_command();
+        let cmd_str = String::from_utf8_lossy(&packed);
+
+        assert!(cmd_str.contains("RRF"));
+        assert!(cmd_str.contains("WINDOW"));
+        assert!(cmd_str.contains("CONSTANT"));
+        assert!(cmd_str.contains("YIELD_SCORE_AS"));
+        assert!(cmd_str.contains("rrf_score"));
+    }
+
+    #[test]
+    fn hybrid_query_linear_with_alpha_like_python() {
+        // Mirrors: test_hybrid_query_combination_method_linear
+        for alpha in [0.1_f32, 0.5, 0.9] {
+            let query = HybridQuery::new(
+                "test query",
+                "description",
+                Vector::new(vec![0.1, 0.2, 0.3, 0.4]),
+                "embedding",
+            )
+            .with_linear(alpha);
+
+            let cmd = query.build_cmd("idx");
+            let packed = cmd.get_packed_command();
+            let cmd_str = String::from_utf8_lossy(&packed);
+
+            assert!(cmd_str.contains("LINEAR"));
+            assert!(cmd_str.contains("ALPHA"));
+            assert!(cmd_str.contains("BETA"));
+        }
+    }
+
+    #[test]
+    fn hybrid_query_without_combination_method_like_python() {
+        // Mirrors: test_hybrid_query_combination_method_none
+        let query = HybridQuery::new(
+            "test query",
+            "description",
+            Vector::new(vec![0.1, 0.2, 0.3, 0.4]),
+            "embedding",
+        );
+
+        let cmd = query.build_cmd("idx");
+        let packed = cmd.get_packed_command();
+        let cmd_str = String::from_utf8_lossy(&packed);
+
+        assert!(!cmd_str.contains("COMBINE"));
+    }
+
+    #[test]
+    fn hybrid_query_with_combined_filters_like_python() {
+        // Mirrors: test_hybrid_query_with_combined_filters
+        let filter = Tag::new("genre").eq("comedy") & Num::new("rating").gt(7.0);
+
+        let query = HybridQuery::new(
+            "test query",
+            "description",
+            Vector::new(vec![0.1, 0.2, 0.3, 0.4]),
+            "embedding",
+        )
+        .with_filter(filter);
+
+        let cmd = query.build_cmd("idx");
+        let packed = cmd.get_packed_command();
+        let cmd_str = String::from_utf8_lossy(&packed);
+
+        assert!(cmd_str.contains("FILTER"));
+        assert!(cmd_str.contains("genre"));
+        assert!(cmd_str.contains("comedy"));
+        assert!(cmd_str.contains("rating"));
+    }
+
+    #[test]
+    fn hybrid_query_with_numeric_filter_like_python() {
+        // Mirrors: test_hybrid_query_with_numeric_filter
+        let filter = Num::new("age").gt(30.0);
+
+        let query = HybridQuery::new(
+            "test query",
+            "description",
+            Vector::new(vec![0.1, 0.2, 0.3, 0.4]),
+            "embedding",
+        )
+        .with_filter(filter);
+
+        let cmd = query.build_cmd("idx");
+        let packed = cmd.get_packed_command();
+        let cmd_str = String::from_utf8_lossy(&packed);
+
+        assert!(cmd_str.contains("FILTER"));
+        assert!(cmd_str.contains("@age:[(30"));
+    }
+
+    #[test]
+    fn hybrid_query_with_text_filter_like_python() {
+        // Mirrors: test_hybrid_query_with_text_filter
+        let filter = Text::new("job").eq("engineer");
+
+        let query = HybridQuery::new(
+            "test query",
+            "description",
+            Vector::new(vec![0.1, 0.2, 0.3, 0.4]),
+            "embedding",
+        )
+        .with_filter(filter);
+
+        let cmd = query.build_cmd("idx");
+        let packed = cmd.get_packed_command();
+        let cmd_str = String::from_utf8_lossy(&packed);
+
+        assert!(cmd_str.contains("FILTER"));
+        assert!(cmd_str.contains("@job"));
+        assert!(cmd_str.contains("engineer"));
     }
 }
