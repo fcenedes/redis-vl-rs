@@ -2,8 +2,9 @@
 //!
 //! This module mirrors the upstream Python `SQLQuery` class that accepts SQL-like
 //! syntax and optional parameters. It implements a lightweight SQL-to-Redis-Search
-//! translation layer that converts basic `SELECT` statements into `FT.SEARCH`
-//! filter syntax.
+//! translation layer that converts `SELECT` statements into `FT.SEARCH` filter
+//! syntax, and aggregate queries (`COUNT`, `GROUP BY`, etc.) into `FT.AGGREGATE`
+//! commands.
 //!
 //! ## What is implemented
 //!
@@ -22,15 +23,21 @@
 //!   - `ORDER BY field ASC|DESC`
 //!   - `LIMIT n [OFFSET m]`
 //!   - `SELECT field1, field2` → `RETURN` field projection
+//! - Aggregate SQL → `FT.AGGREGATE` translation:
+//!   - `COUNT(*)`, `SUM(field)`, `AVG(field)`, `MIN(field)`, `MAX(field)`
+//!   - `STDDEV(field)`, `COUNT_DISTINCT(field)`, `QUANTILE(field, q)`
+//!   - `ARRAY_AGG(field)` → `TOLIST`, `FIRST_VALUE(field)`
+//!   - `GROUP BY field` with multiple reducers
+//!   - `WHERE` filters combined with `GROUP BY`
+//!   - Global aggregation (no `GROUP BY`)
 //!
 //! ## What is out of scope (not yet implemented)
 //!
-//! - Aggregate queries (`COUNT`, `AVG`, `SUM`, `GROUP BY`) → these require
-//!   `FT.AGGREGATE`, a completely different Redis command
 //! - Vector search functions (`cosine_distance()`, `vector_distance()`)
 //! - GEO functions (`geo_distance()`)
 //! - Date functions (`YEAR()` in SELECT, `GROUP BY YEAR()`)
 //! - `IS NULL` / `IS NOT NULL`
+//! - `HAVING` clause
 //! - Phrase-level stopword handling
 
 use std::collections::HashMap;
@@ -127,6 +134,25 @@ impl SQLQuery {
     /// as the Redis query string (fallback behaviour).
     fn parsed(&self) -> Option<ParsedSelect> {
         parse_select(&self.substituted_sql())
+    }
+
+    /// Returns `true` if this SQL query is an aggregate query (contains
+    /// aggregate functions like `COUNT`, `SUM`, `AVG`, etc., or `GROUP BY`).
+    ///
+    /// Aggregate queries are translated to `FT.AGGREGATE` rather than
+    /// `FT.SEARCH`.
+    pub fn is_aggregate(&self) -> bool {
+        parse_aggregate(&self.substituted_sql()).is_some()
+    }
+
+    /// Builds an `FT.AGGREGATE` command for aggregate SQL queries.
+    ///
+    /// Returns `None` if the SQL is not an aggregate query.
+    ///
+    /// The `index_name` parameter is the Redis Search index to query.
+    pub fn build_aggregate_cmd(&self, index_name: &str) -> Option<redis::Cmd> {
+        let parsed = parse_aggregate(&self.substituted_sql())?;
+        Some(parsed.build_cmd(index_name))
     }
 }
 
@@ -392,6 +418,300 @@ fn parse_select(sql: &str) -> Option<ParsedSelect> {
         sort_by,
         limit,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Aggregate SQL parser → FT.AGGREGATE command builder
+// ---------------------------------------------------------------------------
+
+/// A single aggregate reducer (e.g. `COUNT(*)`, `SUM(price)`).
+#[derive(Debug, Clone)]
+struct AggReducer {
+    /// The Redis reducer function name (e.g. `COUNT`, `SUM`, `AVG`, etc.).
+    function: String,
+    /// The field argument to the reducer, if any (empty for `COUNT(*)`).
+    field: Option<String>,
+    /// The output alias (`AS alias`).
+    alias: String,
+    /// Extra numeric argument (e.g. quantile value for `QUANTILE(field, 0.5)`).
+    extra_arg: Option<f64>,
+}
+
+/// A parsed aggregate SQL statement.
+#[derive(Debug, Clone)]
+struct ParsedAggregate {
+    /// Redis Search filter from the WHERE clause.
+    where_filter: Option<String>,
+    /// GROUP BY field names (empty for global aggregation).
+    group_by_fields: Vec<String>,
+    /// Aggregate reducers from the SELECT list.
+    reducers: Vec<AggReducer>,
+}
+
+impl ParsedAggregate {
+    /// Builds an `FT.AGGREGATE` command for this parsed aggregate query.
+    fn build_cmd(&self, index_name: &str) -> redis::Cmd {
+        let mut cmd = redis::cmd("FT.AGGREGATE");
+        cmd.arg(index_name);
+
+        // Query filter (WHERE clause or wildcard).
+        let filter = self.where_filter.as_deref().unwrap_or("*");
+        cmd.arg(filter);
+
+        if self.group_by_fields.is_empty() {
+            // Global aggregation (no GROUP BY).
+            // Use GROUPBY 0 with reducers.
+            cmd.arg("GROUPBY").arg(0_u32);
+            for reducer in &self.reducers {
+                self.append_reducer(&mut cmd, reducer);
+            }
+        } else {
+            // GROUP BY with fields.
+            cmd.arg("GROUPBY").arg(self.group_by_fields.len());
+            for field in &self.group_by_fields {
+                cmd.arg(format!("@{}", field));
+            }
+            for reducer in &self.reducers {
+                self.append_reducer(&mut cmd, reducer);
+            }
+        }
+
+        cmd
+    }
+
+    /// Appends a single REDUCE clause to the command.
+    fn append_reducer(&self, cmd: &mut redis::Cmd, reducer: &AggReducer) {
+        cmd.arg("REDUCE");
+        cmd.arg(&reducer.function);
+
+        match reducer.function.as_str() {
+            "COUNT" => {
+                cmd.arg(0_u32); // COUNT takes 0 arguments
+            }
+            "QUANTILE" => {
+                // QUANTILE takes 2 arguments: field and quantile value
+                cmd.arg(2_u32);
+                if let Some(ref field) = reducer.field {
+                    cmd.arg(format!("@{}", field));
+                }
+                if let Some(q) = reducer.extra_arg {
+                    cmd.arg(format_num(q));
+                }
+            }
+            _ => {
+                // Most reducers take 1 argument: the field
+                cmd.arg(1_u32);
+                if let Some(ref field) = reducer.field {
+                    cmd.arg(format!("@{}", field));
+                }
+            }
+        }
+
+        cmd.arg("AS").arg(&reducer.alias);
+    }
+}
+
+/// Try to parse an aggregate SQL statement.
+///
+/// Returns `Some(ParsedAggregate)` if the SQL contains aggregate functions
+/// (COUNT, SUM, AVG, etc.) or GROUP BY; `None` otherwise.
+fn parse_aggregate(sql: &str) -> Option<ParsedAggregate> {
+    let tokens = tokenize(sql);
+    if tokens.is_empty() {
+        return None;
+    }
+    let mut pos = 0;
+
+    // SELECT
+    if !tok_eq(&tokens, pos, "SELECT") {
+        return None;
+    }
+    pos += 1;
+
+    // Check if this query has aggregate functions in the SELECT list.
+    let has_aggregate_fn = tokens.iter().any(|t| {
+        let upper = t.to_ascii_uppercase();
+        matches!(
+            upper.as_str(),
+            "COUNT"
+                | "AVG"
+                | "SUM"
+                | "MIN"
+                | "MAX"
+                | "STDDEV"
+                | "QUANTILE"
+                | "COUNT_DISTINCT"
+                | "ARRAY_AGG"
+                | "FIRST_VALUE"
+        )
+    });
+
+    let has_group_by = tokens
+        .windows(2)
+        .any(|w| w[0].eq_ignore_ascii_case("GROUP") && w[1].eq_ignore_ascii_case("BY"));
+
+    if !has_aggregate_fn && !has_group_by {
+        return None;
+    }
+
+    // Parse SELECT list for aggregate functions.
+    let mut reducers = Vec::new();
+    // Consume tokens until FROM.
+    while pos < tokens.len() && !tok_eq(&tokens, pos, "FROM") {
+        if let Some((reducer, next)) = try_parse_aggregate_fn(&tokens, pos) {
+            reducers.push(reducer);
+            pos = next;
+        } else if tokens[pos] == "," {
+            pos += 1;
+        } else {
+            // Non-aggregate field in SELECT (e.g. the GROUP BY field).
+            // Skip it—GROUP BY fields are handled separately.
+            pos += 1;
+        }
+    }
+
+    // FROM
+    if !tok_eq(&tokens, pos, "FROM") {
+        return None;
+    }
+    pos += 1;
+    // Skip table name.
+    if pos >= tokens.len() {
+        return None;
+    }
+    pos += 1;
+
+    // Parse WHERE, GROUP BY.
+    let mut where_filter: Option<String> = None;
+    let mut group_by_fields = Vec::new();
+
+    while pos < tokens.len() {
+        if tok_eq(&tokens, pos, "WHERE") {
+            pos += 1;
+            let (filter_str, next) = parse_where_clause(&tokens, pos)?;
+            where_filter = Some(filter_str);
+            pos = next;
+        } else if tok_eq(&tokens, pos, "GROUP") {
+            if !tok_eq(&tokens, pos + 1, "BY") {
+                return None;
+            }
+            pos += 2;
+            // Parse group by fields.
+            while pos < tokens.len() {
+                let upper = tokens[pos].to_ascii_uppercase();
+                if matches!(upper.as_str(), "HAVING" | "ORDER" | "LIMIT") {
+                    break;
+                }
+                if tokens[pos] == "," {
+                    pos += 1;
+                    continue;
+                }
+                group_by_fields.push(tokens[pos].clone());
+                pos += 1;
+            }
+        } else {
+            pos += 1;
+        }
+    }
+
+    // Need at least one reducer to be a valid aggregate query.
+    if reducers.is_empty() {
+        return None;
+    }
+
+    Some(ParsedAggregate {
+        where_filter,
+        group_by_fields,
+        reducers,
+    })
+}
+
+/// Try to parse an aggregate function call at position `pos`.
+///
+/// Handles: `COUNT(*)`, `SUM(field)`, `AVG(field)`, `MIN(field)`, `MAX(field)`,
+/// `STDDEV(field)`, `COUNT_DISTINCT(field)`, `QUANTILE(field, q)`,
+/// `ARRAY_AGG(field)`, `FIRST_VALUE(field)` — all with optional `AS alias`.
+fn try_parse_aggregate_fn(tokens: &[String], pos: usize) -> Option<(AggReducer, usize)> {
+    if pos >= tokens.len() {
+        return None;
+    }
+
+    let func_upper = tokens[pos].to_ascii_uppercase();
+
+    // Map SQL function names to Redis REDUCE function names.
+    let redis_func = match func_upper.as_str() {
+        "COUNT" => "COUNT",
+        "SUM" => "SUM",
+        "AVG" => "AVG",
+        "MIN" => "MIN",
+        "MAX" => "MAX",
+        "STDDEV" => "STDDEV",
+        "COUNT_DISTINCT" => "COUNT_DISTINCT",
+        "QUANTILE" => "QUANTILE",
+        "ARRAY_AGG" => "TOLIST",
+        "FIRST_VALUE" => "FIRST_VALUE",
+        _ => return None,
+    };
+
+    let mut p = pos + 1;
+
+    // Expect '('
+    if !tok_eq(tokens, p, "(") {
+        return None;
+    }
+    p += 1;
+
+    // Parse arguments.
+    let mut field: Option<String> = None;
+    let mut extra_arg: Option<f64> = None;
+
+    if func_upper == "COUNT" && tok_eq(tokens, p, "*") {
+        // COUNT(*)
+        p += 1;
+    } else if p < tokens.len() && tokens[p] != ")" {
+        // First argument: field name
+        field = Some(tokens[p].clone());
+        p += 1;
+
+        // Check for second argument (QUANTILE has 2 args)
+        if tok_eq(tokens, p, ",") {
+            p += 1;
+            if p < tokens.len() && tokens[p] != ")" {
+                extra_arg = tokens[p].parse::<f64>().ok();
+                p += 1;
+            }
+        }
+    }
+
+    // Expect ')'
+    if !tok_eq(tokens, p, ")") {
+        return None;
+    }
+    p += 1;
+
+    // Parse optional AS alias.
+    let alias = if tok_eq(tokens, p, "AS") {
+        p += 1;
+        if p >= tokens.len() {
+            return None;
+        }
+        let a = tokens[p].clone();
+        p += 1;
+        a
+    } else {
+        // Default alias: use the lowercase function name.
+        func_upper.to_lowercase()
+    };
+
+    Some((
+        AggReducer {
+            function: redis_func.to_owned(),
+            field,
+            alias,
+            extra_arg,
+        },
+        p,
+    ))
 }
 
 /// Parse a WHERE clause starting at `pos`. Returns the Redis filter string and
@@ -1491,5 +1811,225 @@ mod tests {
             result,
             "(@created_at:[-inf (1704067200] | @created_at:[(1735603200 +inf])"
         );
+    }
+
+    // ---- Aggregate SQL tests ----
+
+    /// Helper: builds an aggregate command and returns its args as strings.
+    fn agg_cmd_args(sql: &str, index_name: &str) -> Vec<String> {
+        let q = SQLQuery::new(sql);
+        assert!(q.is_aggregate(), "expected aggregate for: {sql}");
+        let cmd = q.build_aggregate_cmd(index_name).unwrap();
+        // Convert redis::Cmd to packed args for inspection.
+        let packed = cmd.get_packed_command();
+        parse_resp_args(&packed)
+    }
+
+    /// Minimal RESP2 inline arg parser for test inspection.
+    fn parse_resp_args(data: &[u8]) -> Vec<String> {
+        let s = String::from_utf8_lossy(data);
+        let mut args = Vec::new();
+        let mut remaining = &s[..];
+        while let Some(dollar) = remaining.find('$') {
+            remaining = &remaining[dollar + 1..];
+            let crlf = remaining.find("\r\n").unwrap();
+            let len: usize = remaining[..crlf].parse().unwrap();
+            remaining = &remaining[crlf + 2..];
+            let val = &remaining[..len];
+            args.push(val.to_string());
+            remaining = &remaining[len + 2..]; // skip \r\n
+        }
+        args
+    }
+
+    #[test]
+    fn aggregate_count_star() {
+        let args = agg_cmd_args("SELECT COUNT(*) AS total FROM products", "idx");
+        assert_eq!(args[0], "FT.AGGREGATE");
+        assert_eq!(args[1], "idx");
+        assert_eq!(args[2], "*"); // no WHERE filter
+        assert_eq!(args[3], "GROUPBY");
+        assert_eq!(args[4], "0");
+        assert_eq!(args[5], "REDUCE");
+        assert_eq!(args[6], "COUNT");
+        assert_eq!(args[7], "0"); // COUNT takes 0 args
+        assert_eq!(args[8], "AS");
+        assert_eq!(args[9], "total");
+    }
+
+    #[test]
+    fn aggregate_count_star_default_alias() {
+        let args = agg_cmd_args("SELECT COUNT(*) FROM products", "idx");
+        assert_eq!(args[9], "count"); // default alias
+    }
+
+    #[test]
+    fn aggregate_sum() {
+        let args = agg_cmd_args("SELECT SUM(price) AS total_price FROM products", "idx");
+        assert_eq!(args[5], "REDUCE");
+        assert_eq!(args[6], "SUM");
+        assert_eq!(args[7], "1"); // SUM takes 1 arg
+        assert_eq!(args[8], "@price");
+        assert_eq!(args[9], "AS");
+        assert_eq!(args[10], "total_price");
+    }
+
+    #[test]
+    fn aggregate_avg() {
+        let args = agg_cmd_args("SELECT AVG(score) AS avg_score FROM products", "idx");
+        assert_eq!(args[6], "AVG");
+        assert_eq!(args[8], "@score");
+        assert_eq!(args[10], "avg_score");
+    }
+
+    #[test]
+    fn aggregate_min_max() {
+        let args = agg_cmd_args("SELECT MIN(price) AS min_price FROM products", "idx");
+        assert_eq!(args[6], "MIN");
+        assert_eq!(args[8], "@price");
+        assert_eq!(args[10], "min_price");
+
+        let args = agg_cmd_args("SELECT MAX(price) AS max_price FROM products", "idx");
+        assert_eq!(args[6], "MAX");
+        assert_eq!(args[8], "@price");
+        assert_eq!(args[10], "max_price");
+    }
+
+    #[test]
+    fn aggregate_stddev() {
+        let args = agg_cmd_args("SELECT STDDEV(price) AS price_sd FROM products", "idx");
+        assert_eq!(args[6], "STDDEV");
+        assert_eq!(args[8], "@price");
+        assert_eq!(args[10], "price_sd");
+    }
+
+    #[test]
+    fn aggregate_count_distinct() {
+        let args = agg_cmd_args(
+            "SELECT COUNT_DISTINCT(brand) AS unique_brands FROM products",
+            "idx",
+        );
+        assert_eq!(args[6], "COUNT_DISTINCT");
+        assert_eq!(args[8], "@brand");
+        assert_eq!(args[10], "unique_brands");
+    }
+
+    #[test]
+    fn aggregate_quantile() {
+        let args = agg_cmd_args("SELECT QUANTILE(price, 0.95) AS p95 FROM products", "idx");
+        assert_eq!(args[6], "QUANTILE");
+        assert_eq!(args[7], "2"); // QUANTILE takes 2 args
+        assert_eq!(args[8], "@price");
+        assert_eq!(args[9], "0.95");
+        assert_eq!(args[10], "AS");
+        assert_eq!(args[11], "p95");
+    }
+
+    #[test]
+    fn aggregate_array_agg_to_tolist() {
+        let args = agg_cmd_args("SELECT ARRAY_AGG(name) AS names FROM products", "idx");
+        assert_eq!(args[6], "TOLIST");
+        assert_eq!(args[8], "@name");
+        assert_eq!(args[10], "names");
+    }
+
+    #[test]
+    fn aggregate_first_value() {
+        let args = agg_cmd_args(
+            "SELECT FIRST_VALUE(name) AS first_name FROM products",
+            "idx",
+        );
+        assert_eq!(args[6], "FIRST_VALUE");
+        assert_eq!(args[8], "@name");
+        assert_eq!(args[10], "first_name");
+    }
+
+    #[test]
+    fn aggregate_group_by_single_field() {
+        let args = agg_cmd_args(
+            "SELECT category, COUNT(*) AS cnt FROM products GROUP BY category",
+            "idx",
+        );
+        assert_eq!(args[0], "FT.AGGREGATE");
+        assert_eq!(args[1], "idx");
+        assert_eq!(args[2], "*");
+        assert_eq!(args[3], "GROUPBY");
+        assert_eq!(args[4], "1");
+        assert_eq!(args[5], "@category");
+        assert_eq!(args[6], "REDUCE");
+        assert_eq!(args[7], "COUNT");
+        assert_eq!(args[8], "0");
+        assert_eq!(args[9], "AS");
+        assert_eq!(args[10], "cnt");
+    }
+
+    #[test]
+    fn aggregate_group_by_with_where() {
+        let args = agg_cmd_args(
+            "SELECT category, AVG(price) AS avg_price FROM products WHERE price > 10 GROUP BY category",
+            "idx",
+        );
+        assert_eq!(args[2], "@price:[(10 +inf]"); // WHERE filter
+        assert_eq!(args[3], "GROUPBY");
+        assert_eq!(args[4], "1");
+        assert_eq!(args[5], "@category");
+        assert_eq!(args[6], "REDUCE");
+        assert_eq!(args[7], "AVG");
+    }
+
+    #[test]
+    fn aggregate_multiple_reducers() {
+        let args = agg_cmd_args(
+            "SELECT category, COUNT(*) AS cnt, AVG(price) AS avg_price FROM products GROUP BY category",
+            "idx",
+        );
+        assert_eq!(args[3], "GROUPBY");
+        assert_eq!(args[4], "1");
+        assert_eq!(args[5], "@category");
+        // First reducer: COUNT
+        assert_eq!(args[6], "REDUCE");
+        assert_eq!(args[7], "COUNT");
+        assert_eq!(args[8], "0");
+        assert_eq!(args[9], "AS");
+        assert_eq!(args[10], "cnt");
+        // Second reducer: AVG
+        assert_eq!(args[11], "REDUCE");
+        assert_eq!(args[12], "AVG");
+        assert_eq!(args[13], "1");
+        assert_eq!(args[14], "@price");
+        assert_eq!(args[15], "AS");
+        assert_eq!(args[16], "avg_price");
+    }
+
+    #[test]
+    fn aggregate_group_by_multiple_fields() {
+        let args = agg_cmd_args(
+            "SELECT category, brand, SUM(price) AS total FROM products GROUP BY category, brand",
+            "idx",
+        );
+        assert_eq!(args[3], "GROUPBY");
+        assert_eq!(args[4], "2");
+        assert_eq!(args[5], "@category");
+        assert_eq!(args[6], "@brand");
+        assert_eq!(args[7], "REDUCE");
+        assert_eq!(args[8], "SUM");
+    }
+
+    #[test]
+    fn non_aggregate_is_not_detected_as_aggregate() {
+        let q = SQLQuery::new("SELECT * FROM products WHERE price > 10");
+        assert!(!q.is_aggregate());
+        assert!(q.build_aggregate_cmd("idx").is_none());
+    }
+
+    #[test]
+    fn aggregate_query_returns_raw_sql_for_search() {
+        // An aggregate query should still work via to_redis_query but fall back
+        // to the raw SQL since it's not a standard SELECT.
+        let q = SQLQuery::new("SELECT COUNT(*) AS total FROM products");
+        assert!(q.is_aggregate());
+        // to_redis_query falls back to raw substituted SQL
+        let redis_q = q.to_redis_query();
+        assert!(redis_q.contains("COUNT"));
     }
 }

@@ -500,7 +500,11 @@ impl SearchIndex {
                             other => Some(other),
                         })
                     }
-                    Err(Error::Redis(err)) if err.kind() == redis::ErrorKind::TypeError => Ok(None),
+                    Err(Error::Redis(err))
+                        if err.kind() == redis::ErrorKind::UnexpectedReturnType =>
+                    {
+                        Ok(None)
+                    }
                     Err(other) => Err(other),
                 }
             }
@@ -765,6 +769,27 @@ impl SearchIndex {
         let value: redis::Value = cmd.query(&mut connection)?;
         let documents = parse_aggregate_result(value)?;
         Ok(QueryOutput::Documents(documents))
+    }
+
+    /// Executes an [`crate::query::SQLQuery`] and automatically dispatches to
+    /// `FT.SEARCH` or `FT.AGGREGATE` depending on the SQL statement.
+    ///
+    /// Aggregate queries (`COUNT`, `SUM`, `GROUP BY`, etc.) are translated to
+    /// `FT.AGGREGATE` commands. All other queries use the regular `FT.SEARCH`
+    /// path.
+    ///
+    /// This mirrors the Python `SearchIndex.query(SQLQuery(...))` behavior.
+    #[cfg(feature = "sql")]
+    pub fn sql_query(&self, query: &crate::query::SQLQuery) -> Result<QueryOutput> {
+        if let Some(cmd) = query.build_aggregate_cmd(self.name()) {
+            let client = self.connection.client()?;
+            let mut connection = client.get_connection()?;
+            let value: redis::Value = cmd.query(&mut connection)?;
+            let documents = parse_aggregate_result(value)?;
+            Ok(QueryOutput::Documents(documents))
+        } else {
+            self.query(query)
+        }
     }
 
     /// Executes a [`crate::query::MultiVectorQuery`] via `FT.AGGREGATE` and returns
@@ -1208,7 +1233,7 @@ impl AsyncSearchIndex {
                             other => Some(other),
                         })
                     }
-                    Err(err) if err.kind() == redis::ErrorKind::TypeError => Ok(None),
+                    Err(err) if err.kind() == redis::ErrorKind::UnexpectedReturnType => Ok(None),
                     Err(err) => Err(Error::Redis(err)),
                 }
             }
@@ -1506,6 +1531,23 @@ impl AsyncSearchIndex {
         let value: redis::Value = cmd.query_async(&mut connection).await?;
         let documents = parse_aggregate_result(value)?;
         Ok(QueryOutput::Documents(documents))
+    }
+
+    /// Executes an [`crate::query::SQLQuery`] asynchronously and automatically dispatches
+    /// to `FT.SEARCH` or `FT.AGGREGATE` depending on the SQL statement.
+    ///
+    /// This mirrors the Python `AsyncSearchIndex.query(SQLQuery(...))` behavior.
+    #[cfg(feature = "sql")]
+    pub async fn sql_query(&self, query: &crate::query::SQLQuery) -> Result<QueryOutput> {
+        if let Some(cmd) = query.build_aggregate_cmd(self.name()) {
+            let client = self.connection.client()?;
+            let mut connection = client.get_multiplexed_async_connection().await?;
+            let value: redis::Value = cmd.query_async(&mut connection).await?;
+            let documents = parse_aggregate_result(value)?;
+            Ok(QueryOutput::Documents(documents))
+        } else {
+            self.query(query).await
+        }
     }
 
     /// Executes a [`crate::query::MultiVectorQuery`] asynchronously via `FT.AGGREGATE` and
@@ -2225,6 +2267,7 @@ fn redis_value_to_json(value: redis::Value) -> Result<Value> {
         redis::Value::Push { .. } | redis::Value::ServerError(_) => {
             Ok(Value::String(format!("{value:?}")))
         }
+        _ => Ok(Value::String(format!("{value:?}"))),
     }
 }
 
