@@ -1,9 +1,11 @@
 //! SQL-like query type for Redis Search parity with Python `redisvl.query.SQLQuery`.
 //!
 //! This module mirrors the upstream Python `SQLQuery` class that accepts SQL-like
-//! syntax and optional parameters. The actual SQL→Redis command translation
-//! depends on an external `sql-redis`-equivalent crate and is **not** implemented
-//! here. What **is** implemented:
+//! syntax and optional parameters. It implements a lightweight SQL-to-Redis-Search
+//! translation layer that converts basic `SELECT` statements into `FT.SEARCH`
+//! filter syntax.
+//!
+//! ## What is implemented
 //!
 //! - `SQLQuery` type holding the raw SQL string and optional parameters
 //! - `SqlParam` enum for typed parameter values (string, numeric, binary)
@@ -11,10 +13,26 @@
 //!   (`:id` won't clobber `:product_id`) and escapes single quotes in strings
 //! - `QueryString` trait implementation so `SQLQuery` can be passed to
 //!   `SearchIndex::query()` / `AsyncSearchIndex::query()`
+//! - SQL→Redis translation for non-aggregate `SELECT` queries:
+//!   - `WHERE` clauses with tag `=`, `!=`, `IN`; numeric `=`, `!=`, `<`, `>`,
+//!     `<=`, `>=`, `BETWEEN`; text `=`, `!=`; and `AND` combinations
+//!   - `ORDER BY field ASC|DESC`
+//!   - `LIMIT n [OFFSET m]`
+//!   - `SELECT field1, field2` → `RETURN` field projection
+//!
+//! ## What is out of scope (not yet implemented)
+//!
+//! - Aggregate queries (`COUNT`, `AVG`, `SUM`, `GROUP BY`) → these require
+//!   `FT.AGGREGATE`, a completely different Redis command
+//! - Vector search functions (`cosine_distance()`, `vector_distance()`)
+//! - GEO functions (`geo_distance()`)
+//! - Date functions (`YEAR()`, date literal parsing)
+//! - `OR` in `WHERE` clauses
+//! - Text wildcards, fuzzy search, phrase-level stopword handling
 
 use std::collections::HashMap;
 
-use super::QueryString;
+use super::{QueryLimit, QueryString, SortBy, SortDirection};
 
 /// A typed SQL parameter value.
 #[derive(Debug, Clone)]
@@ -35,6 +53,10 @@ pub enum SqlParam {
 ///
 /// Holds a SQL `SELECT` statement and optional named parameters. Parameter
 /// placeholders use the `:name` syntax (e.g. `:id`, `:product_id`).
+///
+/// When used with `SearchIndex::query()`, the SQL is parsed and translated
+/// into a Redis Search `FT.SEARCH` filter string. Non-aggregate queries with
+/// `WHERE`, `ORDER BY`, `LIMIT`, and `OFFSET` clauses are supported.
 ///
 /// # Example
 ///
@@ -94,11 +116,44 @@ impl SQLQuery {
     pub fn substituted_sql(&self) -> String {
         substitute_params(&self.sql, &self.params)
     }
+
+    /// Parses the SQL statement into a [`ParsedSelect`].
+    ///
+    /// Returns `None` if the SQL cannot be parsed (e.g. aggregate or
+    /// unsupported syntax). In that case, the raw substituted SQL is used
+    /// as the Redis query string (fallback behaviour).
+    fn parsed(&self) -> Option<ParsedSelect> {
+        parse_select(&self.substituted_sql())
+    }
 }
 
 impl QueryString for SQLQuery {
     fn to_redis_query(&self) -> String {
-        self.substituted_sql()
+        if let Some(parsed) = self.parsed() {
+            parsed.filter_string()
+        } else {
+            // Fallback: return raw substituted SQL (backwards-compatible).
+            self.substituted_sql()
+        }
+    }
+
+    fn return_fields(&self) -> Vec<String> {
+        self.parsed().map(|p| p.return_fields).unwrap_or_default()
+    }
+
+    fn sort_by(&self) -> Option<SortBy> {
+        self.parsed().and_then(|p| p.sort_by)
+    }
+
+    fn limit(&self) -> Option<QueryLimit> {
+        self.parsed().and_then(|p| p.limit)
+    }
+
+    fn should_unpack_json(&self) -> bool {
+        // Unpack JSON when no explicit field projection (SELECT *).
+        self.parsed()
+            .map(|p| p.return_fields.is_empty())
+            .unwrap_or(false)
     }
 }
 
@@ -171,6 +226,487 @@ fn is_ident_start(b: u8) -> bool {
 
 fn is_ident_continue(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
+}
+
+// ---------------------------------------------------------------------------
+// Lightweight SQL SELECT parser → Redis Search translation
+// ---------------------------------------------------------------------------
+
+/// A parsed SQL `SELECT` statement.
+#[derive(Debug, Clone)]
+struct ParsedSelect {
+    /// Field names to project (empty = `SELECT *`).
+    return_fields: Vec<String>,
+    /// Redis Search filter string derived from the `WHERE` clause.
+    where_filter: Option<String>,
+    /// Sort specification from `ORDER BY`.
+    sort_by: Option<SortBy>,
+    /// Limit specification from `LIMIT … [OFFSET …]`.
+    limit: Option<QueryLimit>,
+}
+
+impl ParsedSelect {
+    /// Returns the Redis Search query string used by `FT.SEARCH`.
+    fn filter_string(&self) -> String {
+        self.where_filter.clone().unwrap_or_else(|| "*".to_owned())
+    }
+}
+
+/// Tokenise and parse a SQL `SELECT` statement.
+///
+/// Returns `None` for unsupported syntax (aggregates, sub-queries, etc.).
+fn parse_select(sql: &str) -> Option<ParsedSelect> {
+    let tokens = tokenize(sql);
+    if tokens.is_empty() {
+        return None;
+    }
+    let mut pos = 0;
+
+    // SELECT
+    if !tok_eq(&tokens, pos, "SELECT") {
+        return None;
+    }
+    pos += 1;
+
+    // Bail on aggregate functions in SELECT list.
+    for tok in &tokens {
+        let upper = tok.to_ascii_uppercase();
+        if matches!(
+            upper.as_str(),
+            "COUNT"
+                | "AVG"
+                | "SUM"
+                | "MIN"
+                | "MAX"
+                | "STDDEV"
+                | "QUANTILE"
+                | "COUNT_DISTINCT"
+                | "ARRAY_AGG"
+                | "FIRST_VALUE"
+        ) {
+            return None;
+        }
+    }
+
+    // Bail on vector/geo functions.
+    for tok in &tokens {
+        let lower = tok.to_ascii_lowercase();
+        if lower == "cosine_distance" || lower == "vector_distance" || lower == "geo_distance" {
+            return None;
+        }
+    }
+
+    // Parse field list.
+    let mut return_fields = Vec::new();
+    if tok_eq(&tokens, pos, "*") {
+        pos += 1;
+    } else {
+        loop {
+            if pos >= tokens.len() {
+                return None;
+            }
+            let field = &tokens[pos];
+            if field.eq_ignore_ascii_case("FROM") {
+                break;
+            }
+            // Skip aliases: field AS alias
+            if !field.eq_ignore_ascii_case(",") && !field.eq_ignore_ascii_case("AS") {
+                // Check if the previous token was AS (skip alias names)
+                if pos > 0 && tokens[pos - 1].eq_ignore_ascii_case("AS") {
+                    // This is an alias name, skip it
+                } else {
+                    return_fields.push(field.to_string());
+                }
+            }
+            pos += 1;
+        }
+    }
+
+    // FROM
+    if !tok_eq(&tokens, pos, "FROM") {
+        return None;
+    }
+    pos += 1;
+    // Skip table name.
+    if pos >= tokens.len() {
+        return None;
+    }
+    pos += 1;
+
+    // WHERE, ORDER BY, LIMIT, OFFSET — all optional.
+    let mut where_filter: Option<String> = None;
+    let mut sort_by: Option<SortBy> = None;
+    let mut limit: Option<QueryLimit> = None;
+
+    while pos < tokens.len() {
+        if tok_eq(&tokens, pos, "WHERE") {
+            pos += 1;
+            let (filter_str, next) = parse_where_clause(&tokens, pos)?;
+            where_filter = Some(filter_str);
+            pos = next;
+        } else if tok_eq(&tokens, pos, "ORDER") {
+            if !tok_eq(&tokens, pos + 1, "BY") {
+                return None;
+            }
+            pos += 2;
+            if pos >= tokens.len() {
+                return None;
+            }
+            let field = tokens[pos].clone();
+            pos += 1;
+            let direction = if tok_eq(&tokens, pos, "DESC") {
+                pos += 1;
+                SortDirection::Desc
+            } else {
+                if tok_eq(&tokens, pos, "ASC") {
+                    pos += 1;
+                }
+                SortDirection::Asc
+            };
+            sort_by = Some(SortBy { field, direction });
+        } else if tok_eq(&tokens, pos, "LIMIT") {
+            pos += 1;
+            let num = parse_usize(&tokens, pos)?;
+            pos += 1;
+            let offset = if tok_eq(&tokens, pos, "OFFSET") {
+                pos += 1;
+                let off = parse_usize(&tokens, pos)?;
+                pos += 1;
+                off
+            } else {
+                0
+            };
+            limit = Some(QueryLimit { offset, num });
+        } else {
+            // Unknown clause — skip.
+            pos += 1;
+        }
+    }
+
+    Some(ParsedSelect {
+        return_fields,
+        where_filter,
+        sort_by,
+        limit,
+    })
+}
+
+/// Parse a WHERE clause starting at `pos`. Returns the Redis filter string and
+/// the position after the last consumed token.
+fn parse_where_clause(tokens: &[String], mut pos: usize) -> Option<(String, usize)> {
+    let mut parts: Vec<String> = Vec::new();
+
+    loop {
+        if pos >= tokens.len() {
+            break;
+        }
+        // Stop at ORDER / LIMIT / GROUP (not part of WHERE).
+        let upper = tokens[pos].to_ascii_uppercase();
+        if matches!(upper.as_str(), "ORDER" | "LIMIT" | "GROUP" | "HAVING") {
+            break;
+        }
+        // AND combinator.
+        if upper == "AND" {
+            pos += 1;
+            continue;
+        }
+
+        // Parse a single condition: field op value.
+        let field = &tokens[pos];
+        pos += 1;
+        if pos >= tokens.len() {
+            return None;
+        }
+
+        let op = &tokens[pos];
+        pos += 1;
+
+        // BETWEEN handling: field BETWEEN lo AND hi
+        if op.eq_ignore_ascii_case("BETWEEN") {
+            let lo = parse_numeric_literal(&tokens, pos)?;
+            pos += 1;
+            if !tok_eq(&tokens, pos, "AND") {
+                return None;
+            }
+            pos += 1;
+            let hi = parse_numeric_literal(&tokens, pos)?;
+            pos += 1;
+            parts.push(format!(
+                "@{}:[{} {}]",
+                field,
+                format_num(lo),
+                format_num(hi)
+            ));
+            continue;
+        }
+
+        // IN handling: field IN ('a', 'b')
+        if op.eq_ignore_ascii_case("IN") {
+            if !tok_eq(&tokens, pos, "(") {
+                return None;
+            }
+            pos += 1;
+            let mut vals = Vec::new();
+            loop {
+                if pos >= tokens.len() {
+                    return None;
+                }
+                if tokens[pos] == ")" {
+                    pos += 1;
+                    break;
+                }
+                if tokens[pos] == "," {
+                    pos += 1;
+                    continue;
+                }
+                vals.push(unquote(&tokens[pos]));
+                pos += 1;
+            }
+            let escaped: Vec<String> = vals.iter().map(|v| escape_tag(v)).collect();
+            parts.push(format!("@{}:{{{}}}", field, escaped.join("|")));
+            continue;
+        }
+
+        // !=
+        if op == "!=" {
+            if pos >= tokens.len() {
+                return None;
+            }
+            let value = unquote(&tokens[pos]);
+            pos += 1;
+            if is_numeric_str(&value) {
+                let n: f64 = value.parse().ok()?;
+                parts.push(format!(
+                    "(-@{}:[{} {}])",
+                    field,
+                    format_num(n),
+                    format_num(n)
+                ));
+            } else {
+                // Tag or text negation.
+                parts.push(format!("(-@{}:{{{}}})", field, escape_tag(&value)));
+            }
+            continue;
+        }
+
+        // Comparison operators: =, <, >, <=, >=
+        if pos >= tokens.len() {
+            return None;
+        }
+
+        // Handle two-character ops: <=, >=
+        let (real_op, value_str) = if (op == "<" || op == ">") && tokens[pos] == "=" {
+            let combined = format!("{}=", op);
+            pos += 1;
+            if pos >= tokens.len() {
+                return None;
+            }
+            let v = unquote(&tokens[pos]);
+            pos += 1;
+            (combined, v)
+        } else {
+            let v = unquote(&tokens[pos]);
+            pos += 1;
+            (op.clone(), v)
+        };
+
+        match real_op.as_str() {
+            "=" => {
+                if is_numeric_str(&value_str) {
+                    let n: f64 = value_str.parse().ok()?;
+                    parts.push(format!("@{}:[{} {}]", field, format_num(n), format_num(n)));
+                } else {
+                    // Could be tag or text. Use tag syntax for simple values.
+                    // For text with wildcards or multi-word, use text syntax.
+                    let val = value_str.clone();
+                    if val.contains('*') || val.contains('%') {
+                        // Wildcard/fuzzy → text field search.
+                        parts.push(format!("@{}:({})", field, val));
+                    } else if val.contains(' ') {
+                        // Multi-word → phrase search.
+                        parts.push(format!("@{}:(\"{}\")", field, val));
+                    } else {
+                        // Single term → tag match.
+                        parts.push(format!("@{}:{{{}}}", field, escape_tag(&val)));
+                    }
+                }
+            }
+            "<" => {
+                let n: f64 = value_str.parse().ok()?;
+                parts.push(format!("@{}:[-inf ({}]", field, format_num(n)));
+            }
+            ">" => {
+                let n: f64 = value_str.parse().ok()?;
+                parts.push(format!("@{}:[({} +inf]", field, format_num(n)));
+            }
+            "<=" => {
+                let n: f64 = value_str.parse().ok()?;
+                parts.push(format!("@{}:[-inf {}]", field, format_num(n)));
+            }
+            ">=" => {
+                let n: f64 = value_str.parse().ok()?;
+                parts.push(format!("@{}:[{} +inf]", field, format_num(n)));
+            }
+            _ => return None,
+        }
+    }
+
+    if parts.is_empty() {
+        Some(("*".to_owned(), pos))
+    } else if parts.len() == 1 {
+        Some((parts.into_iter().next().unwrap(), pos))
+    } else {
+        // AND-combine: (a b) in Redis Search syntax.
+        Some((format!("({})", parts.join(" ")), pos))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SQL tokenizer
+// ---------------------------------------------------------------------------
+
+/// Tokenize SQL into a sequence of meaningful tokens.
+///
+/// Handles single-quoted strings, double-quoted identifiers, numbers, identifiers,
+/// and single-character operators.
+fn tokenize(sql: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let chars: Vec<char> = sql.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        // Skip whitespace.
+        if chars[i].is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        // Single-quoted string literal.
+        if chars[i] == '\'' {
+            let mut s = String::new();
+            s.push('\'');
+            i += 1;
+            while i < len {
+                if chars[i] == '\'' {
+                    if i + 1 < len && chars[i + 1] == '\'' {
+                        s.push('\'');
+                        s.push('\'');
+                        i += 2;
+                    } else {
+                        break;
+                    }
+                } else {
+                    s.push(chars[i]);
+                    i += 1;
+                }
+            }
+            s.push('\'');
+            if i < len {
+                i += 1;
+            }
+            tokens.push(s);
+            continue;
+        }
+        // Identifier or keyword.
+        if chars[i].is_ascii_alphabetic() || chars[i] == '_' {
+            let start = i;
+            while i < len && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+                i += 1;
+            }
+            tokens.push(chars[start..i].iter().collect());
+            continue;
+        }
+        // Number (with optional negative sign or decimal point).
+        if chars[i].is_ascii_digit()
+            || (chars[i] == '-' && i + 1 < len && chars[i + 1].is_ascii_digit())
+        {
+            let start = i;
+            if chars[i] == '-' {
+                i += 1;
+            }
+            while i < len && (chars[i].is_ascii_digit() || chars[i] == '.') {
+                i += 1;
+            }
+            tokens.push(chars[start..i].iter().collect());
+            continue;
+        }
+        // Two-character operators: !=, <=, >=.
+        if i + 1 < len {
+            let two: String = chars[i..i + 2].iter().collect();
+            if two == "!=" || two == "<=" || two == ">=" {
+                tokens.push(two);
+                i += 2;
+                continue;
+            }
+        }
+        // Single-character operators/punctuation.
+        tokens.push(chars[i].to_string());
+        i += 1;
+    }
+    tokens
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Case-insensitive token match at position `pos`.
+fn tok_eq(tokens: &[String], pos: usize, expected: &str) -> bool {
+    tokens
+        .get(pos)
+        .map_or(false, |t| t.eq_ignore_ascii_case(expected))
+}
+
+/// Parse a usize from a token at `pos`.
+fn parse_usize(tokens: &[String], pos: usize) -> Option<usize> {
+    tokens.get(pos)?.parse().ok()
+}
+
+/// Parse a numeric literal from a token at `pos`.
+fn parse_numeric_literal(tokens: &[String], pos: usize) -> Option<f64> {
+    let tok = tokens.get(pos)?;
+    // Strip quotes if present.
+    let s = unquote(tok);
+    s.parse().ok()
+}
+
+/// Remove surrounding single quotes from a string literal.
+fn unquote(s: &str) -> String {
+    if s.len() >= 2 && s.starts_with('\'') && s.ends_with('\'') {
+        let inner = &s[1..s.len() - 1];
+        // Unescape double-quotes: '' → '
+        inner.replace("''", "'")
+    } else {
+        s.to_string()
+    }
+}
+
+/// Escape tag value characters for Redis Search `@field:{value}` syntax.
+fn escape_tag(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(|ch| {
+            if matches!(ch, ' ' | '$' | ':' | '&' | '/' | '-' | '.' | '*') {
+                vec!['\\', ch]
+            } else {
+                vec![ch]
+            }
+        })
+        .collect()
+}
+
+/// Check if a string looks like a numeric value.
+fn is_numeric_str(s: &str) -> bool {
+    s.parse::<f64>().is_ok()
+}
+
+/// Format a number: drop fractional part if it's .0.
+fn format_num(n: f64) -> String {
+    if n.fract() == 0.0 {
+        format!("{:.0}", n)
+    } else {
+        n.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -358,5 +894,192 @@ mod tests {
     fn params_map_accessor() {
         let query = SQLQuery::new("SELECT 1").with_param("x", SqlParam::Int(42));
         assert_eq!(query.params_map().len(), 1);
+    }
+
+    // ---- SQL→Redis translation tests ----
+
+    #[test]
+    fn select_star_no_where_produces_wildcard() {
+        let query = SQLQuery::new("SELECT * FROM products");
+        assert_eq!(query.to_redis_query(), "*");
+    }
+
+    #[test]
+    fn select_specific_fields_sets_return_fields() {
+        let query = SQLQuery::new("SELECT title, price FROM products");
+        assert_eq!(query.to_redis_query(), "*");
+        assert_eq!(query.return_fields(), vec!["title", "price"]);
+    }
+
+    #[test]
+    fn where_tag_equals() {
+        let query = SQLQuery::new("SELECT * FROM products WHERE category = 'electronics'");
+        assert_eq!(query.to_redis_query(), "@category:{electronics}");
+    }
+
+    #[test]
+    fn where_tag_not_equals() {
+        let query = SQLQuery::new("SELECT * FROM products WHERE category != 'electronics'");
+        assert_eq!(query.to_redis_query(), "(-@category:{electronics})");
+    }
+
+    #[test]
+    fn where_tag_in() {
+        let query =
+            SQLQuery::new("SELECT * FROM products WHERE category IN ('books', 'accessories')");
+        assert_eq!(query.to_redis_query(), "@category:{books|accessories}");
+    }
+
+    #[test]
+    fn where_numeric_less_than() {
+        let query = SQLQuery::new("SELECT * FROM products WHERE price < 50");
+        assert_eq!(query.to_redis_query(), "@price:[-inf (50]");
+    }
+
+    #[test]
+    fn where_numeric_greater_than() {
+        let query = SQLQuery::new("SELECT * FROM products WHERE price > 100");
+        assert_eq!(query.to_redis_query(), "@price:[(100 +inf]");
+    }
+
+    #[test]
+    fn where_numeric_equals() {
+        let query = SQLQuery::new("SELECT * FROM products WHERE price = 45");
+        assert_eq!(query.to_redis_query(), "@price:[45 45]");
+    }
+
+    #[test]
+    fn where_numeric_not_equals() {
+        let query = SQLQuery::new("SELECT * FROM products WHERE price != 45");
+        assert_eq!(query.to_redis_query(), "(-@price:[45 45])");
+    }
+
+    #[test]
+    fn where_numeric_lte() {
+        let query = SQLQuery::new("SELECT * FROM products WHERE price <= 50");
+        assert_eq!(query.to_redis_query(), "@price:[-inf 50]");
+    }
+
+    #[test]
+    fn where_numeric_gte() {
+        let query = SQLQuery::new("SELECT * FROM products WHERE price >= 25");
+        assert_eq!(query.to_redis_query(), "@price:[25 +inf]");
+    }
+
+    #[test]
+    fn where_between() {
+        let query = SQLQuery::new("SELECT * FROM products WHERE price BETWEEN 40 AND 60");
+        assert_eq!(query.to_redis_query(), "@price:[40 60]");
+    }
+
+    #[test]
+    fn where_combined_and() {
+        let query =
+            SQLQuery::new("SELECT * FROM products WHERE category = 'electronics' AND price < 100");
+        assert_eq!(
+            query.to_redis_query(),
+            "(@category:{electronics} @price:[-inf (100])"
+        );
+    }
+
+    #[test]
+    fn order_by_asc() {
+        let query = SQLQuery::new("SELECT title, price FROM products ORDER BY price ASC");
+        let sb = query.sort_by().expect("sort_by should be set");
+        assert_eq!(sb.field, "price");
+        assert!(matches!(sb.direction, SortDirection::Asc));
+    }
+
+    #[test]
+    fn order_by_desc() {
+        let query = SQLQuery::new("SELECT title, price FROM products ORDER BY price DESC");
+        let sb = query.sort_by().expect("sort_by should be set");
+        assert_eq!(sb.field, "price");
+        assert!(matches!(sb.direction, SortDirection::Desc));
+    }
+
+    #[test]
+    fn limit_clause() {
+        let query = SQLQuery::new("SELECT title FROM products LIMIT 3");
+        let lim = query.limit().expect("limit should be set");
+        assert_eq!(lim.num, 3);
+        assert_eq!(lim.offset, 0);
+    }
+
+    #[test]
+    fn limit_with_offset() {
+        let query = SQLQuery::new("SELECT title FROM products ORDER BY price ASC LIMIT 3 OFFSET 3");
+        let lim = query.limit().expect("limit should be set");
+        assert_eq!(lim.num, 3);
+        assert_eq!(lim.offset, 3);
+    }
+
+    #[test]
+    fn where_with_order_and_limit() {
+        let query = SQLQuery::new(
+            "SELECT title, price FROM products WHERE category = 'electronics' ORDER BY price ASC LIMIT 5",
+        );
+        assert_eq!(query.to_redis_query(), "@category:{electronics}");
+        assert_eq!(query.return_fields(), vec!["title", "price"]);
+        let sb = query.sort_by().expect("sort_by");
+        assert_eq!(sb.field, "price");
+        let lim = query.limit().expect("limit");
+        assert_eq!(lim.num, 5);
+    }
+
+    #[test]
+    fn aggregate_query_returns_raw_sql_fallback() {
+        // Aggregate queries are not translated—they fall back to the raw SQL.
+        let query = SQLQuery::new("SELECT COUNT(*) as total FROM products");
+        let result = query.to_redis_query();
+        // Parsed as None → fallback to substituted_sql.
+        assert!(result.contains("COUNT"));
+    }
+
+    #[test]
+    fn text_equality_single_word() {
+        let query = SQLQuery::new("SELECT * FROM products WHERE title = 'laptop'");
+        assert_eq!(query.to_redis_query(), "@title:{laptop}");
+    }
+
+    #[test]
+    fn text_equality_phrase() {
+        let query = SQLQuery::new("SELECT * FROM products WHERE title = 'gaming laptop'");
+        assert_eq!(query.to_redis_query(), "@title:(\"gaming laptop\")");
+    }
+
+    #[test]
+    fn numeric_range_with_and() {
+        let query = SQLQuery::new("SELECT * FROM products WHERE price >= 25 AND price <= 50");
+        assert_eq!(
+            query.to_redis_query(),
+            "(@price:[25 +inf] @price:[-inf 50])"
+        );
+    }
+
+    #[test]
+    fn should_unpack_json_for_select_star() {
+        let query = SQLQuery::new("SELECT * FROM products");
+        assert!(query.should_unpack_json());
+    }
+
+    #[test]
+    fn should_not_unpack_json_for_field_projection() {
+        let query = SQLQuery::new("SELECT title, price FROM products");
+        assert!(!query.should_unpack_json());
+    }
+
+    #[test]
+    fn with_param_where_tag() {
+        let query = SQLQuery::new("SELECT * FROM products WHERE category = :cat")
+            .with_param("cat", SqlParam::Str("electronics".to_owned()));
+        assert_eq!(query.to_redis_query(), "@category:{electronics}");
+    }
+
+    #[test]
+    fn with_param_where_numeric() {
+        let query = SQLQuery::new("SELECT * FROM products WHERE price > :min_price")
+            .with_param("min_price", SqlParam::Float(99.99));
+        assert_eq!(query.to_redis_query(), "@price:[(99.99 +inf]");
     }
 }
