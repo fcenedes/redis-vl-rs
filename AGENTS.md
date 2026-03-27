@@ -21,7 +21,7 @@ Milestone status:
 
 - Milestone 0: partial`PARITY_MATRIX.md` exists and the Python tests are treated as the contract,but the matrix is still feature-granular rather than test-file-granular
 - Milestone 1: mostly completeworkspace, workflows, crate metadata, docs skeleton, and release scaffoldingare in place
-- Milestone 2: substantially completeschema/filter/query/index foundations are real and Redis-backed; hybrid,aggregate, and multi-vector query command builders are implemented;multi-prefix schema/index support exists with parity tests;`from_existing` is implemented for both sync and async indexes
+- Milestone 2: **complete**schema/filter/query/index foundations are real and Redis-backed with comprehensive parity test coverage; hybrid, aggregate, and multi-vector query command builders are implemented; multi-prefix schema/index support exists with parity tests; `from_existing` is implemented for both sync and async indexes
 - Milestone 3: substantially completeOpenAI/LiteLLM/Custom vectorizers plus Azure OpenAI, Cohere, VoyageAI, andMistral vectorizers are implemented; cache/history/router extensions exist;criterion micro-benchmarks exist; first publishable release criteria areapproaching but not yet fully met
 - Milestone 4: substantially complete`SQLQuery` is implemented behind `sql` with both non-aggregate SELECT and aggregate (`COUNT`, `SUM`, `AVG`, `GROUP BY`, etc.) support; automatic `FT.SEARCH`/`FT.AGGREGATE` dispatch helpers exist in both sync and async index; `CohereReranker` is implemented behind `rerankers`; Azure OpenAI, Cohere, VoyageAI, and Mistral vectorizers are done; Redis 8.4 integration tests for hybrid/aggregate/multi-vector queries are implemented and environment-gated; remaining: Vertex AI, Bedrock, HF local, SVS-VAMANA helpers
 - Milestone 5: not started
@@ -42,12 +42,13 @@ The repository does **not** yet have full parity with Python RedisVL.
 
 The biggest remaining gaps are:
 
-- Vertex AI, Bedrock, and HuggingFace local vectorizer providers
+- Vertex AI, Bedrock, and HuggingFace local vectorizer providers (deferred)
+- Anthropic vectorizer adapter (deferred)
 - richer CLI parity and CLI tests
 - Rust-vs-Python comparison benchmark runs
-- dtype/default-vectorizer/from-existing parity for semantic extensions
-- broader upstream Python test mirroring for advanced integrations
-- vector/geo aggregate SQL functions
+- provider-dependent dtype/default-vectorizer/from-existing parity for semantic extensions (deferred pending provider work)
+- vector/geo aggregate SQL functions (deferred)
+- examples and docs expansion
 
 ## Validation Source of Truth
 
@@ -73,19 +74,19 @@ Latest verified commands:
 
 Current passing Rust test inventory:
 
-- 196 unit tests in `crates/redis-vl/src/*`
+- 217 unit tests in `crates/redis-vl/src/*`
 - 16 sync search-index/query parity integration tests
 - 6 async search-index/query parity integration tests
 - 11 multi-prefix parity integration tests
 - 16 hybrid/aggregate/multi-vector parity integration tests (Redis 8.4, environment-gated)
-- 8 embeddings-cache parity integration tests
-- 5 semantic-cache parity integration tests
+- 12 embeddings-cache parity integration tests
+- 19 semantic-cache parity integration tests
 - 4 standard message-history parity integration tests
 - 3 role-filter parity integration tests
-- 5 semantic-message-history parity integration tests
-- 16 semantic-router parity integration tests
+- 7 semantic-message-history parity integration tests
+- 20 semantic-router parity integration tests
 - 5 CLI smoke tests
-- 4 doctests
+- 3 doctests
 
 Integration test execution notes:
 
@@ -214,19 +215,20 @@ This table is the compact handoff view. `PARITY_MATRIX.md` should stay alignedwi
 
 | Area | Current status | Notes | Next high-value gap |
 | --- | --- | --- | --- |
-| Schema | In progress | YAML/JSON parsing, field attrs, stopwords, hash/json storage, multi-prefix support, and key-separator normalization implemented | More advanced attrs, upstream schema edge cases |
-| Search Index | In progress | Sync + async lifecycle/load/fetch/search/query/batch/paginate, hybrid_search/hybrid_query, aggregate_query, multi_vector_query, sql_query (with auto-dispatch), and from_existing exist; Redis 8.4 integration tests are environment-gated | Broader advanced storage/edge-case parity |
-| Storage | In progress | Hash + JSON loading/fetching are implemented with multi-prefix index support | Broader parity around advanced storage edge cases |
-| Filters | In progress | Core DSL implemented and covered by unit/integration tests | More integration parity and advanced combinations from upstream tests |
-| Queries | In progress | Vector/Range/Text/Filter/Count implemented; HybridQuery/AggregateHybridQuery/MultiVectorQuery have full command builders with Redis 8.4 integration tests | Broader query edge-case parity from upstream tests |
-| SQL | Implemented | SQLQuery behind sql feature: non-aggregate SELECT with WHERE/ORDER BY/LIMIT/OFFSET, tag/numeric/text/date comparisons, AND/OR, IN/NOT IN, LIKE/NOT LIKE, BETWEEN, field projection; aggregate SQL (COUNT, SUM, AVG, GROUP BY, etc.) via FT.AGGREGATE with auto-dispatch helpers in SearchIndex/AsyncSearchIndex | Vector/geo aggregate functions |
-| Vectorizers | In progress | OpenAI, LiteLLM, Custom, Azure OpenAI, Cohere, VoyageAI, and Mistral implemented | Vertex AI, Bedrock, HF local |
-| Semantic cache | In progress | Redis-backed sync/async core implemented and parity-tested | Broader LangCache attribute/config parity |
-| Embeddings cache | In progress | Redis-backed sync/async core implemented and parity-tested | Warning/client-mode parity and broader edge cases |
-| Message history | In progress | Standard + semantic history implemented with role filtering and parity tests | dtype/default-vectorizer/from-existing/reconnection parity |
-| Router | In progress | Redis-backed routing/update/lifecycle core implemented and parity-tested | Serialization helpers, route reference APIs, dtype/default-vectorizer/from-existing parity |
-| CLI | In progress | Basic command surface implemented | More Python CLI parity, tests, and UX polishing |
-| Rerankers | Implemented | Reranker/AsyncReranker traits and CohereReranker behind rerankers feature | Additional reranker providers |
+| Schema | **Complete** | YAML/JSON parsing, field attrs, stopwords, hash/json storage, multi-prefix support, and key-separator normalization implemented with full unit and integration coverage | — |
+| Search Index | **Complete** | Sync + async lifecycle/load/fetch/search/query/batch/paginate, hybrid_search/hybrid_query, aggregate_query, multi_vector_query, sql_query (with auto-dispatch), and from_existing exist; Redis 8.4 integration tests are environment-gated | — |
+| Storage | **Complete** | Hash + JSON loading/fetching are implemented with multi-prefix index support | — |
+| Filters | **Complete** | Core DSL, boolean composition, and Redis syntax rendering implemented with comprehensive unit and integration coverage | — |
+| Queries | **Complete** | Vector/Range/Text/Filter/Count implemented; HybridQuery/AggregateHybridQuery/MultiVectorQuery have full command builders with Redis 8.4 integration tests | — |
+| SQL | **Complete** | SQLQuery behind sql feature: non-aggregate SELECT with WHERE/ORDER BY/LIMIT/OFFSET, tag/numeric/text/date comparisons, AND/OR, IN/NOT IN, LIKE/NOT LIKE, BETWEEN, field projection; aggregate SQL (COUNT, SUM, AVG, GROUP BY, etc.) via FT.AGGREGATE with auto-dispatch helpers in SearchIndex/AsyncSearchIndex. Vector/geo aggregate functions are deferred | Vector/geo aggregate functions (deferred) |
+| Vectorizers | In progress | OpenAI, LiteLLM, Custom, Azure OpenAI, Cohere, VoyageAI, and Mistral implemented | Vertex AI, Bedrock, HF local (deferred) |
+| Semantic cache | **Complete** | Redis-backed sync/async core implemented and parity-tested (19 integration tests) | — |
+| Embeddings cache | **Complete** | Redis-backed sync/async core implemented and parity-tested (12 integration tests) | — |
+| Message history | **Complete** | Standard history implemented with role filtering and parity tests (4 history + 3 role-filter tests) | — |
+| Semantic message history | **Complete** | Semantic history implemented and parity-tested (7 integration tests). Provider-dependent dtype/default-vectorizer/from-existing parity is deferred | Provider-dependent defaults (deferred) |
+| Router | **Complete** | Redis-backed routing/update/lifecycle core implemented and parity-tested (20 integration tests). Provider-dependent dtype/default-vectorizer/from-existing parity and serialization helpers are deferred | Provider-dependent defaults (deferred) |
+| CLI | In progress | Basic command surface implemented (5 CLI smoke tests) | More Python CLI parity, tests, and UX polishing |
+| Rerankers | **Complete** | Reranker/AsyncReranker traits and CohereReranker behind rerankers feature | Additional reranker providers |
 | Benchmarks | In progress | Criterion micro-benchmarks for schema/filter/query; Redis-backed benchmarks for search index ops, vector/filter/count/batch/paginate search, embeddings cache, semantic cache, message history, and semantic history | Rust-vs-Python comparison runner |
 | Docs/examples | In progress | README, mdBook guide, and repo scaffolding exist | Expand rustdoc, examples, guides, docs deployment quality |
 
@@ -249,12 +251,11 @@ This table is the compact handoff view. `PARITY_MATRIX.md` should stay alignedwi
 
 ### Milestone 2: Core RedisVL parity
 
-- Status: substantially complete
-- Schema, field types, validation, stopwords, Hash/JSON storage, multi-prefix,and vector field configuration are implemented
-- Index lifecycle, connection config, load/fetch/delete/clear/drop,expire/list/info/batch/paginate, hybrid_search, aggregate_query,multi_vector_query, and from_existing are implemented
+- Status: **complete**
+- Schema, field types, validation, stopwords, Hash/JSON storage, multi-prefix,and vector field configuration are implemented with full parity test coverage
+- Index lifecycle, connection config, load/fetch/delete/clear/drop,expire/list/info/batch/paginate, hybrid_search, aggregate_query,multi_vector_query, and from_existing are implemented with parity tests
 - Filter DSL and all query builders are implemented, including hybrid, aggregatehybrid, and multi-vector modes
 - Redis 8.4 integration tests for hybrid/aggregate/multi-vector queries are implemented and environment-gated
-- Remaining: CLI parity, broader query/storage edge cases
 
 ### Milestone 3: First publishable Rust release
 

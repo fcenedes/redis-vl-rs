@@ -36,10 +36,10 @@ of [Redis](https://redis.io/).
 
 ### Not yet implemented
 
-- Aggregate SQL queries (`COUNT`, `GROUP BY`, vector/geo functions)
-- Additional vectorizer providers (Vertex AI, Bedrock, HuggingFace local)
-- Redis 8.4 end-to-end integration testing for hybrid/aggregate/multi-vector
-- Semantic extension parity (dtype, default vectorizers, from-existing)
+- Additional vectorizer providers (Vertex AI, Bedrock, HuggingFace local, Anthropic)
+- Vector/geo aggregate SQL functions
+- Provider-dependent semantic extension defaults (dtype, default vectorizers, from-existing)
+- Richer CLI command/flag parity
 
 ## Quick start
 
