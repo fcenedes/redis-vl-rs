@@ -1,8 +1,6 @@
 # RedisVL Rust Implementation Plan
 
-This file is the working source of truth for the RedisVL Rust implementation.
-It captures the target architecture, parity roadmap, and current status of the
-repository.
+This file is the working source of truth for the RedisVL Rust implementation.It captures the target architecture, parity roadmap, and current status of therepository.
 
 ## Current Status
 
@@ -16,70 +14,29 @@ What is implemented today:
 - `crates/rvl`: buildable CLI crate
 - CI/docs/release workflow scaffolding
 - `PARITY_MATRIX.md` as the feature tracker
-- core schema, filter, query, index, vectorizer, cache, history, and router
-  modules
+- core schema, filter, query, index, vectorizer, cache, history, and routermodules
 - a growing Rust integration suite derived from upstream Python tests
 
 Milestone status:
 
-- Milestone 0: partial
-  `PARITY_MATRIX.md` exists and the Python tests are treated as the contract,
-  but the matrix is still feature-granular rather than test-file-granular
-- Milestone 1: mostly complete
-  workspace, workflows, crate metadata, docs skeleton, and release scaffolding
-  are in place
-- Milestone 2: substantially complete
-  schema/filter/query/index foundations are real and Redis-backed; hybrid,
-  aggregate, and multi-vector query command builders are implemented;
-  multi-prefix schema/index support exists with parity tests;
-  `from_existing` is implemented for both sync and async indexes
-- Milestone 3: substantially complete
-  OpenAI/LiteLLM/Custom vectorizers plus Azure OpenAI, Cohere, VoyageAI, and
-  Mistral vectorizers are implemented; cache/history/router extensions exist;
-  criterion micro-benchmarks exist; first publishable release criteria are
-  approaching but not yet fully met
-- Milestone 4: partially complete
-  `SQLQuery` is implemented behind `sql` (non-aggregate SELECT translation);
-  `CohereReranker` is implemented behind `rerankers`; Azure OpenAI, Cohere,
-  VoyageAI, and Mistral vectorizers are done; remaining: Vertex AI, Bedrock,
-  HF local, aggregate SQL, Redis 8.4 integration validation
+- Milestone 0: partial`PARITY_MATRIX.md` exists and the Python tests are treated as the contract,but the matrix is still feature-granular rather than test-file-granular
+- Milestone 1: mostly completeworkspace, workflows, crate metadata, docs skeleton, and release scaffoldingare in place
+- Milestone 2: substantially completeschema/filter/query/index foundations are real and Redis-backed; hybrid,aggregate, and multi-vector query command builders are implemented;multi-prefix schema/index support exists with parity tests;`from_existing` is implemented for both sync and async indexes
+- Milestone 3: substantially completeOpenAI/LiteLLM/Custom vectorizers plus Azure OpenAI, Cohere, VoyageAI, andMistral vectorizers are implemented; cache/history/router extensions exist;criterion micro-benchmarks exist; first publishable release criteria areapproaching but not yet fully met
+- Milestone 4: partially complete`SQLQuery` is implemented behind `sql` (non-aggregate SELECT translation);`CohereReranker` is implemented behind `rerankers`; Azure OpenAI, Cohere,VoyageAI, and Mistral vectorizers are done; remaining: Vertex AI, Bedrock,HF local, aggregate SQL, Redis 8.4 integration validation
 - Milestone 5: not started
 
 Implemented surface snapshot:
 
-- Schema:
-  YAML/JSON parsing, field validation, hash/json storage selection, stopwords,
-  vector attrs, multi-prefix support, and key-separator normalization
-- Filters:
-  `Tag`, `Text`, `Num`, `Geo`, `GeoRadius`, `Timestamp`, boolean composition,
-  and Redis syntax rendering
-- Queries:
-  `VectorQuery`, `VectorRangeQuery`, `TextQuery`, `FilterQuery`, `CountQuery`,
-  `HybridQuery` (generates `FT.HYBRID` for Redis 8.4+),
-  `AggregateHybridQuery` (generates `FT.AGGREGATE`),
-  `MultiVectorQuery` (generates multi-vector aggregate commands),
-  `SQLQuery` (SQL→Redis Search translation behind `sql` feature)
-- Search index:
-  sync + async `create`, `delete`, `drop`, `exists`, `listall`, `info`, `load`,
-  `fetch`, `search`, `query`, `batch_search`, `batch_query`, `paginate`,
-  `hybrid_search`, `hybrid_query`, `aggregate_query`, `multi_vector_query`,
-  `from_existing`, `drop_*`, `expire_*`, and `clear`
-- Vectorizers:
-  `Vectorizer`, `AsyncVectorizer`, `OpenAITextVectorizer`,
-  `LiteLLMTextVectorizer`, `CustomTextVectorizer`,
-  `AzureOpenAITextVectorizer`, `CohereTextVectorizer`,
-  `VoyageAITextVectorizer`, and `MistralAITextVectorizer`
-- Rerankers:
-  `Reranker`, `AsyncReranker` traits, and `CohereReranker` (behind
-  `rerankers` feature)
-- Extensions:
-  `EmbeddingsCache`, `SemanticCache`, `MessageHistory`,
-  `SemanticMessageHistory`, and `SemanticRouter` are all Redis-backed
-- CLI:
-  `rvl version`, `index create/delete/destroy/info/listall`, and `stats`
-- Benchmarks:
-  criterion micro-benchmarks for schema parsing, filter rendering, and query
-  building
+- Schema:YAML/JSON parsing, field validation, hash/json storage selection, stopwords,vector attrs, multi-prefix support, and key-separator normalization
+- Filters:`Tag`, `Text`, `Num`, `Geo`, `GeoRadius`, `Timestamp`, boolean composition,and Redis syntax rendering
+- Queries:`VectorQuery`, `VectorRangeQuery`, `TextQuery`, `FilterQuery`, `CountQuery`,`HybridQuery` (generates `FT.HYBRID` for Redis 8.4+),`AggregateHybridQuery` (generates `FT.AGGREGATE`),`MultiVectorQuery` (generates multi-vector aggregate commands),`SQLQuery` (SQL→Redis Search translation behind `sql` feature)
+- Search index:sync + async `create`, `delete`, `drop`, `exists`, `listall`, `info`, `load`,`fetch`, `search`, `query`, `batch_search`, `batch_query`, `paginate`,`hybrid_search`, `hybrid_query`, `aggregate_query`, `multi_vector_query`,`from_existing`, `drop_*`, `expire_*`, and `clear`
+- Vectorizers:`Vectorizer`, `AsyncVectorizer`, `OpenAITextVectorizer`,`LiteLLMTextVectorizer`, `CustomTextVectorizer`,`AzureOpenAITextVectorizer`, `CohereTextVectorizer`,`VoyageAITextVectorizer`, and `MistralAITextVectorizer`
+- Rerankers:`Reranker`, `AsyncReranker` traits, and `CohereReranker` (behind`rerankers` feature)
+- Extensions:`EmbeddingsCache`, `SemanticCache`, `MessageHistory`,`SemanticMessageHistory`, and `SemanticRouter` are all Redis-backed
+- CLI:`rvl version`, `index create/delete/destroy/info/listall`, and `stats`
+- Benchmarks:criterion micro-benchmarks for schema parsing, filter rendering, and querybuilding
 
 The repository does **not** yet have full parity with Python RedisVL.
 
@@ -98,18 +55,14 @@ The biggest remaining gaps are:
 The upstream Python test suite is the parity contract for this repository.
 
 - Primary reference: `redis/redis-vl-python/tests`
-- Rust tests should be added by mirroring behavior from the matching Python test
-  module whenever practical
+- Rust tests should be added by mirroring behavior from the matching Python testmodule whenever practical
 - If docs and tests disagree, prefer upstream test behavior
-- Parity progress should be measured against Python test coverage first, then
-  against README and API docs examples
+- Parity progress should be measured against Python test coverage first, thenagainst README and API docs examples
 
 Useful local reference during this work:
 
-- The upstream repo has recently been mirrored locally at
-  `/tmp/redis-vl-python`
-- If that directory is missing in a future session, re-establish a local copy
-  before continuing parity work
+- The upstream repo has recently been mirrored locally at`/tmp/redis-vl-python`
+- If that directory is missing in a future session, re-establish a local copybefore continuing parity work
 
 ## Verification Snapshot
 
@@ -190,48 +143,30 @@ Upstream Python test files already partially mirrored:
 
 Important caution for a takeover session:
 
-- `HybridQuery`, `AggregateHybridQuery`, and `MultiVectorQuery` command builders
-  are implemented, but end-to-end Redis 8.4 integration testing is not yet done;
-  these require `FT.HYBRID` and `FT.AGGREGATE` support from the Redis server
-- `SQLQuery` translation covers non-aggregate SELECT queries; aggregate SQL
-  (`COUNT`, `GROUP BY`, vector/geo functions) is not yet implemented
-- `SemanticMessageHistory` exists, but Python features around dtype/default
-  vectorizers/reconnection/from-existing are still missing
-- `SemanticRouter` exists, but Python features around serialization helpers,
-  route reference management, dtype/default vectorizers, and from-existing style
-  behavior are still missing
-- Multi-prefix schema parsing and index creation are implemented; key composition
-  for multi-prefix loading uses the first prefix
+- `HybridQuery`, `AggregateHybridQuery`, and `MultiVectorQuery` command buildersare implemented, but end-to-end Redis 8.4 integration testing is not yet done;these require `FT.HYBRID` and `FT.AGGREGATE` support from the Redis server
+- `SQLQuery` translation covers non-aggregate SELECT queries; aggregate SQL(`COUNT`, `GROUP BY`, vector/geo functions) is not yet implemented
+- `SemanticMessageHistory` exists, but Python features around dtype/defaultvectorizers/reconnection/from-existing are still missing
+- `SemanticRouter` exists, but Python features around serialization helpers,route reference management, dtype/default vectorizers, and from-existing stylebehavior are still missing
+- Multi-prefix schema parsing and index creation are implemented; key compositionfor multi-prefix loading uses the first prefix
 
 ## Summary
 
-- Build a greenfield Rust workspace that targets feature parity with the Python
-  `redis-vl` library, while using an idiomatic Rust API rather than cloning
-  Python call signatures.
+- Build a greenfield Rust workspace that targets feature parity with the Python`redis-vl` library, while using an idiomatic Rust API rather than cloningPython call signatures.
 - Use a workspace split:
   - `crates/redis-vl`: public library crate
   - `crates/rvl`: CLI crate
-- Make the library async-first, but implement a shared command/compiler layer so
-  blocking wrappers can reuse the same schema/query/cache/router logic without
-  duplicating behavior.
-- Treat core search/indexing plus AI extensions plus CLI as the first
-  publishable milestone; defer SQL, rerankers, and non-required providers into
-  explicit parity-completion waves.
+- Make the library async-first, but implement a shared command/compiler layer soblocking wrappers can reuse the same schema/query/cache/router logic withoutduplicating behavior.
+- Treat core search/indexing plus AI extensions plus CLI as the firstpublishable milestone; defer SQL, rerankers, and non-required providers intoexplicit parity-completion waves.
 - Use upstream source and API docs as the authority when docs and README diverge.
 
 ## Architecture
 
 ### Public modules
 
-- `redis_vl::schema`: `IndexSchema`, field definitions, field attrs, stopwords,
-  Hash vs JSON storage, YAML loading, SVS-VAMANA attrs
-- `redis_vl::index`: `SearchIndex`, `AsyncSearchIndex`, connection config,
-  CRUD/load/fetch/list/info lifecycle
-- `redis_vl::query`: `VectorQuery`, `VectorRangeQuery`, `TextQuery`,
-  `FilterQuery`, `CountQuery`, `AggregateHybridQuery`, `HybridQuery`,
-  `MultiVectorQuery`, `SQLQuery`, `Vector`
-- `redis_vl::filter`: `FilterExpression`, `Tag`, `Text`, `Num`, `Geo`,
-  `GeoRadius`, `Timestamp`
+- `redis_vl::schema`: `IndexSchema`, field definitions, field attrs, stopwords,Hash vs JSON storage, YAML loading, SVS-VAMANA attrs
+- `redis_vl::index`: `SearchIndex`, `AsyncSearchIndex`, connection config,CRUD/load/fetch/list/info lifecycle
+- `redis_vl::query`: `VectorQuery`, `VectorRangeQuery`, `TextQuery`,`FilterQuery`, `CountQuery`, `AggregateHybridQuery`, `HybridQuery`,`MultiVectorQuery`, `SQLQuery`, `Vector`
+- `redis_vl::filter`: `FilterExpression`, `Tag`, `Text`, `Num`, `Geo`,`GeoRadius`, `Timestamp`
 - `redis_vl::vectorizers`: `Vectorizer` trait plus provider adapters
 - `redis_vl::rerankers`: provider rerankers
 - `redis_vl::extensions::{cache, history, router}`
@@ -239,20 +174,15 @@ Important caution for a takeover session:
 
 ### Internal layering
 
-- `command`: pure compilation of schemas/queries/filters into Redis Search and
-  RedisJSON commands
+- `command`: pure compilation of schemas/queries/filters into Redis Search andRedisJSON commands
 - `transport`: sync and async Redis execution traits and response decoding
-- `http`: provider auth/request/response adapters for OpenAI-compatible and
-  later providers
-- `model`: shared typed structs for cache entries, routes, messages, results,
-  and stats
+- `http`: provider auth/request/response adapters for OpenAI-compatible andlater providers
+- `model`: shared typed structs for cache entries, routes, messages, results,and stats
 
 ### Rust defaults
 
-- Prefer borrowed inputs where practical: `&str`, `&[T]`, `Cow<'a, str>`,
-  `Cow<'a, [f32]>`
-- Use zero-copy vector encoding where possible for Redis query params and bulk
-  load paths
+- Prefer borrowed inputs where practical: `&str`, `&[T]`, `Cow<'a, str>`,`Cow<'a, [f32]>`
+- Use zero-copy vector encoding where possible for Redis query params and bulkload paths
 - Keep `#![deny(missing_docs)]` enabled on the library crate
 - Use builders for complex queries/configuration
 - Return `Result<T, Error>` from fallible public APIs
@@ -279,8 +209,7 @@ Important caution for a takeover session:
 
 ## Coverage Matrix
 
-This table is the compact handoff view. `PARITY_MATRIX.md` should stay aligned
-with it.
+This table is the compact handoff view. `PARITY_MATRIX.md` should stay alignedwith it.
 
 | Area | Current status | Notes | Next high-value gap |
 | --- | --- | --- | --- |
@@ -289,14 +218,14 @@ with it.
 | Storage | In progress | Hash + JSON loading/fetching are implemented with multi-prefix index support | Broader parity around advanced storage edge cases |
 | Filters | In progress | Core DSL implemented and covered by unit/integration tests | More integration parity and advanced combinations from upstream tests |
 | Queries | In progress | Vector/Range/Text/Filter/Count implemented; HybridQuery/AggregateHybridQuery/MultiVectorQuery have full command builders | Redis 8.4 integration tests for FT.HYBRID and FT.AGGREGATE |
-| SQL | Implemented | `SQLQuery` behind `sql` feature: non-aggregate SELECT with WHERE/ORDER BY/LIMIT/OFFSET, tag/numeric/text/date comparisons, AND/OR, IN/NOT IN, LIKE/NOT LIKE, BETWEEN, field projection | Aggregate SQL (COUNT, GROUP BY), vector/geo functions |
+| SQL | Implemented | SQLQuery behind sql feature: non-aggregate SELECT with WHERE/ORDER BY/LIMIT/OFFSET, tag/numeric/text/date comparisons, AND/OR, IN/NOT IN, LIKE/NOT LIKE, BETWEEN, field projection | Aggregate SQL (COUNT, GROUP BY), vector/geo functions |
 | Vectorizers | In progress | OpenAI, LiteLLM, Custom, Azure OpenAI, Cohere, VoyageAI, and Mistral implemented | Vertex AI, Bedrock, HF local |
 | Semantic cache | In progress | Redis-backed sync/async core implemented and parity-tested | Broader LangCache attribute/config parity |
 | Embeddings cache | In progress | Redis-backed sync/async core implemented and parity-tested | Warning/client-mode parity and broader edge cases |
 | Message history | In progress | Standard + semantic history implemented with role filtering and parity tests | dtype/default-vectorizer/from-existing/reconnection parity |
 | Router | In progress | Redis-backed routing/update/lifecycle core implemented and parity-tested | Serialization helpers, route reference APIs, dtype/default-vectorizer/from-existing parity |
 | CLI | In progress | Basic command surface implemented | More Python CLI parity, tests, and UX polishing |
-| Rerankers | Implemented | `Reranker`/`AsyncReranker` traits and `CohereReranker` behind `rerankers` feature | Additional reranker providers |
+| Rerankers | Implemented | Reranker/AsyncReranker traits and CohereReranker behind rerankers feature | Additional reranker providers |
 | Benchmarks | In progress | Criterion micro-benchmarks for schema/filter/query exist | Rust-vs-Python comparison runner |
 | Docs/examples | In progress | README, mdBook guide, and repo scaffolding exist | Expand rustdoc, examples, guides, docs deployment quality |
 
@@ -313,33 +242,23 @@ with it.
 
 - Status: mostly complete
 - Create workspace with `redis-vl` and `rvl`
-- Add `README.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, `SECURITY.md`,
-  `examples/`, `benches/`, `docs/`
-- Set up CI, docs, release automation, crate metadata, docs.rs metadata, and
-  feature tracking
+- Add `README.md`, `CONTRIBUTING.md`, `CHANGELOG.md`, `SECURITY.md`,`examples/`, `benches/`, `docs/`
+- Set up CI, docs, release automation, crate metadata, docs.rs metadata, andfeature tracking
 - Use `release-plz` for automated versioning and publishing
 
 ### Milestone 2: Core RedisVL parity
 
 - Status: substantially complete
-- Schema, field types, validation, stopwords, Hash/JSON storage, multi-prefix,
-  and vector field configuration are implemented
-- Index lifecycle, connection config, load/fetch/delete/clear/drop,
-  expire/list/info/batch/paginate, hybrid_search, aggregate_query,
-  multi_vector_query, and from_existing are implemented
-- Filter DSL and all query builders are implemented, including hybrid, aggregate
-  hybrid, and multi-vector modes
+- Schema, field types, validation, stopwords, Hash/JSON storage, multi-prefix,and vector field configuration are implemented
+- Index lifecycle, connection config, load/fetch/delete/clear/drop,expire/list/info/batch/paginate, hybrid_search, aggregate_query,multi_vector_query, and from_existing are implemented
+- Filter DSL and all query builders are implemented, including hybrid, aggregatehybrid, and multi-vector modes
 - Remaining: Redis 8.4 end-to-end integration testing, CLI parity
 
 ### Milestone 3: First publishable Rust release
 
 - Status: substantially complete
-- `Vectorizer` trait, OpenAI-compatible transport, `OpenAITextVectorizer`,
-  `LiteLLMTextVectorizer`, `CustomVectorizer`, `AzureOpenAITextVectorizer`,
-  `CohereTextVectorizer`, `VoyageAITextVectorizer`, and
-  `MistralAITextVectorizer` are implemented
-- `SemanticCache`, `EmbeddingsCache`, `MessageHistory`,
-  `SemanticMessageHistory`, and `SemanticRouter` are implemented
+- `Vectorizer` trait, OpenAI-compatible transport, `OpenAITextVectorizer`,`LiteLLMTextVectorizer`, `CustomVectorizer`, `AzureOpenAITextVectorizer`,`CohereTextVectorizer`, `VoyageAITextVectorizer`, and`MistralAITextVectorizer` are implemented
+- `SemanticCache`, `EmbeddingsCache`, `MessageHistory`,`SemanticMessageHistory`, and `SemanticRouter` are implemented
 - Criterion micro-benchmarks exist
 - Publish `0.x` only when:
   - all Phase 1 rows are green
@@ -366,26 +285,12 @@ with it.
 
 If a new agent/session takes over, the recommended order is:
 
-1. Redis 8.4 integration testing for hybrid/aggregate/multi-vector queries
-   The command builders exist but need end-to-end validation against a Redis 8.4
-   instance; mirror `tests/integration/test_hybrid.py` and
-   `tests/integration/test_aggregation.py` as integration tests
-2. Aggregate SQL support
-   Extend `crates/redis-vl/src/query/sql.rs` to handle `COUNT`, `GROUP BY`,
-   and other aggregate functions via `FT.AGGREGATE`; mirror
-   `tests/integration/test_sql_redis_hash.py` and
-   `tests/integration/test_sql_redis_json.py`
-3. Remaining vectorizer providers
-   Add Vertex AI, Bedrock, and HuggingFace local vectorizers
-4. Search-index/key-construction edge cases
-   Continue from `tests/integration/test_key_separator_handling.py` and related
-   schema/index tests
-5. CLI parity and CLI tests
-   Expand `crates/rvl/src/main.rs` and add CLI-focused tests mirroring Python CLI
-   expectations where possible
-6. Semantic extension parity
-   Add dtype/default-vectorizer/from-existing/reconnection support to
-   `SemanticMessageHistory` and `SemanticRouter`
+1. Redis 8.4 integration testing for hybrid/aggregate/multi-vector queriesThe command builders exist but need end-to-end validation against a Redis 8.4instance; mirror `tests/integration/test_hybrid.py` and`tests/integration/test_aggregation.py` as integration tests
+2. Aggregate SQL supportExtend `crates/redis-vl/src/query/sql.rs` to handle `COUNT`, `GROUP BY`,and other aggregate functions via `FT.AGGREGATE`; mirror`tests/integration/test_sql_redis_hash.py` and`tests/integration/test_sql_redis_json.py`
+3. Remaining vectorizer providersAdd Vertex AI, Bedrock, and HuggingFace local vectorizers
+4. Search-index/key-construction edge casesContinue from `tests/integration/test_key_separator_handling.py` and relatedschema/index tests
+5. CLI parity and CLI testsExpand `crates/rvl/src/main.rs` and add CLI-focused tests mirroring Python CLIexpectations where possible
+6. Semantic extension parityAdd dtype/default-vectorizer/from-existing/reconnection support to`SemanticMessageHistory` and `SemanticRouter`
 7. Rust-vs-Python benchmark comparison runner
 8. Examples and docs expansion
 
@@ -395,16 +300,11 @@ Before making the next major parity patch:
 
 - read the relevant upstream Python test file first
 - implement only the minimal Rust surface needed for that contract
-- add or extend a Rust parity test file that names the upstream source in its
-  module docs
-- run:
-  `cargo fmt --all`
-- run:
-  `cargo check --workspace`
-- run:
-  `cargo test --workspace`
-- if a live Redis instance is available, run:
-  `REDISVL_RUN_INTEGRATION=1 cargo test --workspace`
+- add or extend a Rust parity test file that names the upstream source in itsmodule docs
+- run:`cargo fmt --all`
+- run:`cargo check --workspace`
+- run:`cargo test --workspace`
+- if a live Redis instance is available, run:`REDISVL_RUN_INTEGRATION=1 cargo test --workspace`
 
 ## Test Plan
 
@@ -481,8 +381,5 @@ Before making the next major parity patch:
 
 ## Implementation Notes
 
-- This file should be updated whenever major parity milestones or architecture
-  decisions change.
-- `PARITY_MATRIX.md` should stay more granular than this file; use this file for
-  roadmap and repository conventions, and the parity matrix for feature-level
-  tracking.
+- This file should be updated whenever major parity milestones or architecturedecisions change.
+- `PARITY_MATRIX.md` should stay more granular than this file; use this file forroadmap and repository conventions, and the parity matrix for feature-leveltracking.
