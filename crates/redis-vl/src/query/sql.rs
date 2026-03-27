@@ -14,8 +14,11 @@
 //! - `QueryString` trait implementation so `SQLQuery` can be passed to
 //!   `SearchIndex::query()` / `AsyncSearchIndex::query()`
 //! - SQL→Redis translation for non-aggregate `SELECT` queries:
-//!   - `WHERE` clauses with tag `=`, `!=`, `IN`; numeric `=`, `!=`, `<`, `>`,
-//!     `<=`, `>=`, `BETWEEN`; text `=`, `!=`; and `AND` combinations
+//!   - `WHERE` clauses with tag `=`, `!=`, `IN`, `NOT IN`; numeric `=`, `!=`,
+//!     `<`, `>`, `<=`, `>=`, `BETWEEN`; text `=`, `!=`; `LIKE` / `NOT LIKE`
+//!   - `AND` and `OR` combinators with correct precedence (AND binds tighter)
+//!   - ISO date literal parsing (`'2024-01-01'`, `'2024-01-15T10:30:00'`)
+//!     in comparison and `BETWEEN` clauses
 //!   - `ORDER BY field ASC|DESC`
 //!   - `LIMIT n [OFFSET m]`
 //!   - `SELECT field1, field2` → `RETURN` field projection
@@ -26,9 +29,9 @@
 //!   `FT.AGGREGATE`, a completely different Redis command
 //! - Vector search functions (`cosine_distance()`, `vector_distance()`)
 //! - GEO functions (`geo_distance()`)
-//! - Date functions (`YEAR()`, date literal parsing)
-//! - `OR` in `WHERE` clauses
-//! - Text wildcards, fuzzy search, phrase-level stopword handling
+//! - Date functions (`YEAR()` in SELECT, `GROUP BY YEAR()`)
+//! - `IS NULL` / `IS NOT NULL`
+//! - Phrase-level stopword handling
 
 use std::collections::HashMap;
 
@@ -393,8 +396,13 @@ fn parse_select(sql: &str) -> Option<ParsedSelect> {
 
 /// Parse a WHERE clause starting at `pos`. Returns the Redis filter string and
 /// the position after the last consumed token.
+///
+/// Supports `AND` and `OR` combinators with correct precedence: `AND` binds
+/// tighter than `OR`, so `a AND b OR c AND d` is parsed as `(a b) | (c d)`.
 fn parse_where_clause(tokens: &[String], mut pos: usize) -> Option<(String, usize)> {
-    let mut parts: Vec<String> = Vec::new();
+    // We collect OR-separated groups of AND-joined conditions.
+    let mut or_groups: Vec<Vec<String>> = Vec::new();
+    let mut current_and_group: Vec<String> = Vec::new();
 
     loop {
         if pos >= tokens.len() {
@@ -405,160 +413,248 @@ fn parse_where_clause(tokens: &[String], mut pos: usize) -> Option<(String, usiz
         if matches!(upper.as_str(), "ORDER" | "LIMIT" | "GROUP" | "HAVING") {
             break;
         }
-        // AND combinator.
+        // AND combinator — continue in current group.
         if upper == "AND" {
             pos += 1;
             continue;
         }
-
-        // Parse a single condition: field op value.
-        let field = &tokens[pos];
-        pos += 1;
-        if pos >= tokens.len() {
-            return None;
-        }
-
-        let op = &tokens[pos];
-        pos += 1;
-
-        // BETWEEN handling: field BETWEEN lo AND hi
-        if op.eq_ignore_ascii_case("BETWEEN") {
-            let lo = parse_numeric_literal(&tokens, pos)?;
+        // OR combinator — start a new group.
+        if upper == "OR" {
             pos += 1;
-            if !tok_eq(&tokens, pos, "AND") {
-                return None;
-            }
-            pos += 1;
-            let hi = parse_numeric_literal(&tokens, pos)?;
-            pos += 1;
-            parts.push(format!(
-                "@{}:[{} {}]",
-                field,
-                format_num(lo),
-                format_num(hi)
-            ));
+            or_groups.push(std::mem::take(&mut current_and_group));
             continue;
         }
 
-        // IN handling: field IN ('a', 'b')
-        if op.eq_ignore_ascii_case("IN") {
-            if !tok_eq(&tokens, pos, "(") {
-                return None;
-            }
-            pos += 1;
-            let mut vals = Vec::new();
-            loop {
-                if pos >= tokens.len() {
-                    return None;
-                }
-                if tokens[pos] == ")" {
-                    pos += 1;
-                    break;
-                }
-                if tokens[pos] == "," {
-                    pos += 1;
-                    continue;
-                }
-                vals.push(unquote(&tokens[pos]));
-                pos += 1;
-            }
-            let escaped: Vec<String> = vals.iter().map(|v| escape_tag(v)).collect();
-            parts.push(format!("@{}:{{{}}}", field, escaped.join("|")));
-            continue;
-        }
+        let (filter, next) = parse_single_condition(tokens, pos)?;
+        current_and_group.push(filter);
+        pos = next;
+    }
 
-        // !=
-        if op == "!=" {
-            if pos >= tokens.len() {
-                return None;
-            }
-            let value = unquote(&tokens[pos]);
-            pos += 1;
-            if is_numeric_str(&value) {
-                let n: f64 = value.parse().ok()?;
-                parts.push(format!(
-                    "(-@{}:[{} {}])",
-                    field,
-                    format_num(n),
-                    format_num(n)
-                ));
+    // Push the last AND group.
+    if !current_and_group.is_empty() {
+        or_groups.push(current_and_group);
+    }
+
+    if or_groups.is_empty() {
+        return Some(("*".to_owned(), pos));
+    }
+
+    // Build the filter string.
+    let group_strs: Vec<String> = or_groups
+        .into_iter()
+        .map(|g| {
+            if g.len() == 1 {
+                g.into_iter().next().unwrap()
             } else {
-                // Tag or text negation.
-                parts.push(format!("(-@{}:{{{}}})", field, escape_tag(&value)));
+                format!("({})", g.join(" "))
             }
-            continue;
-        }
+        })
+        .collect();
 
-        // Comparison operators: =, <, >, <=, >=
-        if pos >= tokens.len() {
+    let filter = if group_strs.len() == 1 {
+        group_strs.into_iter().next().unwrap()
+    } else {
+        // OR-combine: (a | b) in Redis Search syntax.
+        format!("({})", group_strs.join(" | "))
+    };
+
+    Some((filter, pos))
+}
+
+/// Parse a single WHERE condition starting at `pos`.
+///
+/// Returns the Redis filter string for this condition and the position after
+/// the last consumed token.
+fn parse_single_condition(tokens: &[String], mut pos: usize) -> Option<(String, usize)> {
+    let field = &tokens[pos];
+    pos += 1;
+    if pos >= tokens.len() {
+        return None;
+    }
+
+    let op = &tokens[pos];
+    pos += 1;
+
+    // BETWEEN handling: field BETWEEN lo AND hi
+    if op.eq_ignore_ascii_case("BETWEEN") {
+        let lo = parse_numeric_or_date_literal(tokens, pos)?;
+        pos += 1;
+        if !tok_eq(tokens, pos, "AND") {
             return None;
         }
+        pos += 1;
+        let hi = parse_numeric_or_date_literal(tokens, pos)?;
+        pos += 1;
+        return Some((
+            format!("@{}:[{} {}]", field, format_num(lo), format_num(hi)),
+            pos,
+        ));
+    }
 
-        // Handle two-character ops: <=, >=
-        let (real_op, value_str) = if (op == "<" || op == ">") && tokens[pos] == "=" {
-            let combined = format!("{}=", op);
-            pos += 1;
+    // NOT IN handling: field NOT IN ('a', 'b')
+    if op.eq_ignore_ascii_case("NOT") && tok_eq(tokens, pos, "IN") {
+        pos += 1; // skip "IN"
+        if !tok_eq(tokens, pos, "(") {
+            return None;
+        }
+        pos += 1;
+        let mut vals = Vec::new();
+        loop {
             if pos >= tokens.len() {
                 return None;
             }
-            let v = unquote(&tokens[pos]);
+            if tokens[pos] == ")" {
+                pos += 1;
+                break;
+            }
+            if tokens[pos] == "," {
+                pos += 1;
+                continue;
+            }
+            vals.push(unquote(&tokens[pos]));
             pos += 1;
-            (combined, v)
-        } else {
-            let v = unquote(&tokens[pos]);
-            pos += 1;
-            (op.clone(), v)
-        };
+        }
+        let escaped: Vec<String> = vals.iter().map(|v| escape_tag(v)).collect();
+        return Some((format!("(-@{}:{{{}}})", field, escaped.join("|")), pos));
+    }
 
-        match real_op.as_str() {
-            "=" => {
-                if is_numeric_str(&value_str) {
-                    let n: f64 = value_str.parse().ok()?;
-                    parts.push(format!("@{}:[{} {}]", field, format_num(n), format_num(n)));
-                } else {
-                    // Could be tag or text. Use tag syntax for simple values.
-                    // For text with wildcards or multi-word, use text syntax.
-                    let val = value_str.clone();
-                    if val.contains('*') || val.contains('%') {
-                        // Wildcard/fuzzy → text field search.
-                        parts.push(format!("@{}:({})", field, val));
-                    } else if val.contains(' ') {
-                        // Multi-word → phrase search.
-                        parts.push(format!("@{}:(\"{}\")", field, val));
-                    } else {
-                        // Single term → tag match.
-                        parts.push(format!("@{}:{{{}}}", field, escape_tag(&val)));
-                    }
-                }
+    // IN handling: field IN ('a', 'b')
+    if op.eq_ignore_ascii_case("IN") {
+        if !tok_eq(tokens, pos, "(") {
+            return None;
+        }
+        pos += 1;
+        let mut vals = Vec::new();
+        loop {
+            if pos >= tokens.len() {
+                return None;
             }
-            "<" => {
-                let n: f64 = value_str.parse().ok()?;
-                parts.push(format!("@{}:[-inf ({}]", field, format_num(n)));
+            if tokens[pos] == ")" {
+                pos += 1;
+                break;
             }
-            ">" => {
-                let n: f64 = value_str.parse().ok()?;
-                parts.push(format!("@{}:[({} +inf]", field, format_num(n)));
+            if tokens[pos] == "," {
+                pos += 1;
+                continue;
             }
-            "<=" => {
-                let n: f64 = value_str.parse().ok()?;
-                parts.push(format!("@{}:[-inf {}]", field, format_num(n)));
-            }
-            ">=" => {
-                let n: f64 = value_str.parse().ok()?;
-                parts.push(format!("@{}:[{} +inf]", field, format_num(n)));
-            }
-            _ => return None,
+            vals.push(unquote(&tokens[pos]));
+            pos += 1;
+        }
+        let escaped: Vec<String> = vals.iter().map(|v| escape_tag(v)).collect();
+        return Some((format!("@{}:{{{}}}", field, escaped.join("|")), pos));
+    }
+
+    // LIKE handling: field LIKE 'pattern'
+    if op.eq_ignore_ascii_case("LIKE") {
+        if pos >= tokens.len() {
+            return None;
+        }
+        let pattern = unquote(&tokens[pos]);
+        pos += 1;
+        let redis_pattern = sql_like_to_redis(&pattern);
+        return Some((format!("@{}:({})", field, redis_pattern), pos));
+    }
+
+    // NOT LIKE handling: field NOT LIKE 'pattern'
+    if op.eq_ignore_ascii_case("NOT") && tok_eq(tokens, pos, "LIKE") {
+        pos += 1; // skip "LIKE"
+        if pos >= tokens.len() {
+            return None;
+        }
+        let pattern = unquote(&tokens[pos]);
+        pos += 1;
+        let redis_pattern = sql_like_to_redis(&pattern);
+        return Some((format!("(-@{}:({}))", field, redis_pattern), pos));
+    }
+
+    // !=
+    if op == "!=" {
+        if pos >= tokens.len() {
+            return None;
+        }
+        let value = unquote(&tokens[pos]);
+        pos += 1;
+        if is_numeric_str(&value) {
+            let n: f64 = value.parse().ok()?;
+            return Some((
+                format!("(-@{}:[{} {}])", field, format_num(n), format_num(n)),
+                pos,
+            ));
+        } else if let Some(ts) = try_parse_date(&value) {
+            return Some((
+                format!("(-@{}:[{} {}])", field, format_num(ts), format_num(ts)),
+                pos,
+            ));
+        } else {
+            // Tag or text negation.
+            return Some((format!("(-@{}:{{{}}})", field, escape_tag(&value)), pos));
         }
     }
 
-    if parts.is_empty() {
-        Some(("*".to_owned(), pos))
-    } else if parts.len() == 1 {
-        Some((parts.into_iter().next().unwrap(), pos))
-    } else {
-        // AND-combine: (a b) in Redis Search syntax.
-        Some((format!("({})", parts.join(" ")), pos))
+    // Comparison operators: =, <, >, <=, >=
+    if pos >= tokens.len() {
+        return None;
     }
+
+    // Handle two-character ops: <=, >=
+    let (real_op, value_str) = if (op == "<" || op == ">") && tokens[pos] == "=" {
+        let combined = format!("{}=", op);
+        pos += 1;
+        if pos >= tokens.len() {
+            return None;
+        }
+        let v = unquote(&tokens[pos]);
+        pos += 1;
+        (combined, v)
+    } else {
+        let v = unquote(&tokens[pos]);
+        pos += 1;
+        (op.clone(), v)
+    };
+
+    let filter = match real_op.as_str() {
+        "=" => {
+            if is_numeric_str(&value_str) {
+                let n: f64 = value_str.parse().ok()?;
+                format!("@{}:[{} {}]", field, format_num(n), format_num(n))
+            } else if let Some(ts) = try_parse_date(&value_str) {
+                format!("@{}:[{} {}]", field, format_num(ts), format_num(ts))
+            } else {
+                // Could be tag or text. Use tag syntax for simple values.
+                // For text with wildcards or multi-word, use text syntax.
+                let val = value_str.clone();
+                if val.contains('*') || val.contains('%') {
+                    // Wildcard/fuzzy → text field search.
+                    format!("@{}:({})", field, val)
+                } else if val.contains(' ') {
+                    // Multi-word → phrase search.
+                    format!("@{}:(\"{}\")", field, val)
+                } else {
+                    // Single term → tag match.
+                    format!("@{}:{{{}}}", field, escape_tag(&val))
+                }
+            }
+        }
+        "<" => {
+            let n = parse_num_or_date(&value_str)?;
+            format!("@{}:[-inf ({}]", field, format_num(n))
+        }
+        ">" => {
+            let n = parse_num_or_date(&value_str)?;
+            format!("@{}:[({} +inf]", field, format_num(n))
+        }
+        "<=" => {
+            let n = parse_num_or_date(&value_str)?;
+            format!("@{}:[-inf {}]", field, format_num(n))
+        }
+        ">=" => {
+            let n = parse_num_or_date(&value_str)?;
+            format!("@{}:[{} +inf]", field, format_num(n))
+        }
+        _ => return None,
+    };
+
+    Some((filter, pos))
 }
 
 // ---------------------------------------------------------------------------
@@ -662,12 +758,116 @@ fn parse_usize(tokens: &[String], pos: usize) -> Option<usize> {
     tokens.get(pos)?.parse().ok()
 }
 
-/// Parse a numeric literal from a token at `pos`.
-fn parse_numeric_literal(tokens: &[String], pos: usize) -> Option<f64> {
+/// Parse a numeric literal or ISO date string from a token at `pos`.
+///
+/// This extends `parse_numeric_literal` to handle date strings like
+/// `'2024-01-01'` by converting them to Unix timestamps.
+fn parse_numeric_or_date_literal(tokens: &[String], pos: usize) -> Option<f64> {
     let tok = tokens.get(pos)?;
-    // Strip quotes if present.
     let s = unquote(tok);
-    s.parse().ok()
+    if let Ok(n) = s.parse::<f64>() {
+        Some(n)
+    } else {
+        try_parse_date(&s)
+    }
+}
+
+/// Try to parse a string as a number; if that fails, try as an ISO date.
+fn parse_num_or_date(s: &str) -> Option<f64> {
+    if let Ok(n) = s.parse::<f64>() {
+        Some(n)
+    } else {
+        try_parse_date(s)
+    }
+}
+
+/// Try to parse an ISO 8601 date string (`YYYY-MM-DD` or `YYYY-MM-DDTHH:MM:SS`)
+/// and return the Unix timestamp as `f64`.
+///
+/// This mirrors the upstream Python `sql-redis` library's date literal handling.
+fn try_parse_date(s: &str) -> Option<f64> {
+    // Try YYYY-MM-DD
+    if s.len() == 10 && s.as_bytes().get(4) == Some(&b'-') && s.as_bytes().get(7) == Some(&b'-') {
+        let year: i32 = s[0..4].parse().ok()?;
+        let month: u32 = s[5..7].parse().ok()?;
+        let day: u32 = s[8..10].parse().ok()?;
+        if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+            return None;
+        }
+        // Compute days from Unix epoch (1970-01-01) using a simplified calendar.
+        let ts = date_to_unix_timestamp(year, month, day)?;
+        return Some(ts as f64);
+    }
+    // Try YYYY-MM-DDTHH:MM:SS
+    if s.len() >= 19 && (s.as_bytes().get(10) == Some(&b'T') || s.as_bytes().get(10) == Some(&b' '))
+    {
+        let year: i32 = s[0..4].parse().ok()?;
+        let month: u32 = s[5..7].parse().ok()?;
+        let day: u32 = s[8..10].parse().ok()?;
+        let hour: u32 = s[11..13].parse().ok()?;
+        let min: u32 = s[14..16].parse().ok()?;
+        let sec: u32 = s[17..19].parse().ok()?;
+        if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+            return None;
+        }
+        if hour > 23 || min > 59 || sec > 59 {
+            return None;
+        }
+        let day_ts = date_to_unix_timestamp(year, month, day)?;
+        let ts = day_ts + (hour as i64) * 3600 + (min as i64) * 60 + (sec as i64);
+        return Some(ts as f64);
+    }
+    None
+}
+
+/// Convert a date (year, month, day) to a Unix timestamp (seconds since 1970-01-01 UTC).
+fn date_to_unix_timestamp(year: i32, month: u32, day: u32) -> Option<i64> {
+    // Days in months (non-leap).
+    const DAYS_IN_MONTH: [u32; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    fn is_leap(y: i32) -> bool {
+        (y % 4 == 0 && y % 100 != 0) || y % 400 == 0
+    }
+
+    // Count days from 1970-01-01 to the given date.
+    let mut days: i64 = 0;
+
+    // Years
+    if year >= 1970 {
+        for y in 1970..year {
+            days += if is_leap(y) { 366 } else { 365 };
+        }
+    } else {
+        for y in year..1970 {
+            days -= if is_leap(y) { 366 } else { 365 };
+        }
+    }
+
+    // Months
+    for m in 1..month {
+        let mut d = DAYS_IN_MONTH[(m - 1) as usize];
+        if m == 2 && is_leap(year) {
+            d += 1;
+        }
+        days += d as i64;
+    }
+
+    // Days (1-based, so day 1 = 0 extra days)
+    days += (day as i64) - 1;
+
+    Some(days * 86400)
+}
+
+/// Convert a SQL `LIKE` pattern to Redis Search text syntax.
+///
+/// - `%` is mapped to `*` (match zero or more characters)
+/// - `_` is left as-is (Redis does not have single-char wildcard; best effort)
+///
+/// Examples:
+/// - `laptop%` → `laptop*`
+/// - `%laptop` → `*laptop`
+/// - `%laptop%` → `*laptop*`
+fn sql_like_to_redis(pattern: &str) -> String {
+    pattern.replace('%', "*")
 }
 
 /// Remove surrounding single quotes from a string literal.
@@ -1081,5 +1281,215 @@ mod tests {
         let query = SQLQuery::new("SELECT * FROM products WHERE price > :min_price")
             .with_param("min_price", SqlParam::Float(99.99));
         assert_eq!(query.to_redis_query(), "@price:[(99.99 +inf]");
+    }
+
+    // ---- OR support ----
+
+    #[test]
+    fn where_simple_or() {
+        let query = SQLQuery::new(
+            "SELECT * FROM products WHERE category = 'electronics' OR category = 'books'",
+        );
+        assert_eq!(
+            query.to_redis_query(),
+            "(@category:{electronics} | @category:{books})"
+        );
+    }
+
+    #[test]
+    fn where_or_with_three_branches() {
+        let query = SQLQuery::new(
+            "SELECT * FROM products WHERE category = 'electronics' OR category = 'books' OR category = 'accessories'",
+        );
+        assert_eq!(
+            query.to_redis_query(),
+            "(@category:{electronics} | @category:{books} | @category:{accessories})"
+        );
+    }
+
+    #[test]
+    fn where_and_binds_tighter_than_or() {
+        // a AND b OR c AND d → (a b) | (c d)
+        let query = SQLQuery::new(
+            "SELECT * FROM products WHERE category = 'electronics' AND price > 100 OR category = 'books' AND price < 50",
+        );
+        assert_eq!(
+            query.to_redis_query(),
+            "((@category:{electronics} @price:[(100 +inf]) | (@category:{books} @price:[-inf (50]))"
+        );
+    }
+
+    #[test]
+    fn where_or_with_single_conditions() {
+        let query = SQLQuery::new("SELECT * FROM products WHERE price < 20 OR price > 1000");
+        assert_eq!(
+            query.to_redis_query(),
+            "(@price:[-inf (20] | @price:[(1000 +inf])"
+        );
+    }
+
+    #[test]
+    fn where_or_preserves_order_limit() {
+        let query = SQLQuery::new(
+            "SELECT title FROM products WHERE category = 'a' OR category = 'b' ORDER BY price ASC LIMIT 5",
+        );
+        assert_eq!(query.to_redis_query(), "(@category:{a} | @category:{b})");
+        assert!(query.sort_by().is_some());
+        assert_eq!(query.limit().unwrap().num, 5);
+    }
+
+    // ---- NOT IN support ----
+
+    #[test]
+    fn where_not_in() {
+        let query =
+            SQLQuery::new("SELECT * FROM products WHERE category NOT IN ('electronics', 'books')");
+        assert_eq!(query.to_redis_query(), "(-@category:{electronics|books})");
+    }
+
+    #[test]
+    fn where_not_in_combined_with_and() {
+        let query = SQLQuery::new(
+            "SELECT * FROM products WHERE category NOT IN ('electronics') AND price > 50",
+        );
+        assert_eq!(
+            query.to_redis_query(),
+            "((-@category:{electronics}) @price:[(50 +inf])"
+        );
+    }
+
+    // ---- LIKE support ----
+
+    #[test]
+    fn where_like_prefix() {
+        let query = SQLQuery::new("SELECT * FROM products WHERE title LIKE 'laptop%'");
+        assert_eq!(query.to_redis_query(), "@title:(laptop*)");
+    }
+
+    #[test]
+    fn where_like_suffix() {
+        let query = SQLQuery::new("SELECT * FROM products WHERE title LIKE '%laptop'");
+        assert_eq!(query.to_redis_query(), "@title:(*laptop)");
+    }
+
+    #[test]
+    fn where_like_contains() {
+        let query = SQLQuery::new("SELECT * FROM products WHERE title LIKE '%laptop%'");
+        assert_eq!(query.to_redis_query(), "@title:(*laptop*)");
+    }
+
+    #[test]
+    fn where_not_like() {
+        let query = SQLQuery::new("SELECT * FROM products WHERE title NOT LIKE 'laptop%'");
+        assert_eq!(query.to_redis_query(), "(-@title:(laptop*))");
+    }
+
+    #[test]
+    fn where_like_combined_with_and() {
+        let query =
+            SQLQuery::new("SELECT * FROM products WHERE title LIKE 'lap%' AND price < 1000");
+        assert_eq!(
+            query.to_redis_query(),
+            "(@title:(lap*) @price:[-inf (1000])"
+        );
+    }
+
+    // ---- Date literal parsing ----
+
+    #[test]
+    fn where_date_greater_than() {
+        let query = SQLQuery::new("SELECT * FROM events WHERE created_at > '2024-01-01'");
+        let result = query.to_redis_query();
+        // 2024-01-01 00:00:00 UTC = 1704067200
+        assert_eq!(result, "@created_at:[(1704067200 +inf]");
+    }
+
+    #[test]
+    fn where_date_less_than() {
+        let query = SQLQuery::new("SELECT * FROM events WHERE created_at < '2024-03-31'");
+        let result = query.to_redis_query();
+        // 2024-03-31 00:00:00 UTC = 1711843200
+        assert_eq!(result, "@created_at:[-inf (1711843200]");
+    }
+
+    #[test]
+    fn where_date_between() {
+        let query = SQLQuery::new(
+            "SELECT * FROM events WHERE created_at BETWEEN '2024-01-01' AND '2024-03-31'",
+        );
+        let result = query.to_redis_query();
+        assert_eq!(result, "@created_at:[1704067200 1711843200]");
+    }
+
+    #[test]
+    fn where_date_gte() {
+        let query = SQLQuery::new("SELECT * FROM events WHERE created_at >= '2024-06-15'");
+        let result = query.to_redis_query();
+        // 2024-06-15 = 1718409600
+        assert_eq!(result, "@created_at:[1718409600 +inf]");
+    }
+
+    #[test]
+    fn where_date_combined_with_tag() {
+        let query = SQLQuery::new(
+            "SELECT * FROM events WHERE category = 'meeting' AND created_at > '2024-01-01'",
+        );
+        let result = query.to_redis_query();
+        assert_eq!(
+            result,
+            "(@category:{meeting} @created_at:[(1704067200 +inf])"
+        );
+    }
+
+    #[test]
+    fn where_datetime_with_time() {
+        let query = SQLQuery::new("SELECT * FROM events WHERE created_at > '2024-01-15T10:30:00'");
+        let result = query.to_redis_query();
+        // 2024-01-15 00:00:00 UTC = 1705276800, + 10*3600 + 30*60 = 37800 → 1705314600
+        assert_eq!(result, "@created_at:[(1705314600 +inf]");
+    }
+
+    #[test]
+    fn date_to_timestamp_known_values() {
+        // 1970-01-01 → 0
+        assert_eq!(try_parse_date("1970-01-01"), Some(0.0));
+        // 2000-01-01 → 946684800
+        assert_eq!(try_parse_date("2000-01-01"), Some(946684800.0));
+        // 2024-01-01 → 1704067200
+        assert_eq!(try_parse_date("2024-01-01"), Some(1704067200.0));
+    }
+
+    #[test]
+    fn invalid_date_returns_none() {
+        assert_eq!(try_parse_date("not-a-date"), None);
+        assert_eq!(try_parse_date("2024-13-01"), None); // invalid month
+        assert_eq!(try_parse_date("2024-00-01"), None); // month 0
+        assert_eq!(try_parse_date("2024-01-32"), None); // day 32
+    }
+
+    // ---- OR combined with other new features ----
+
+    #[test]
+    fn where_or_with_like() {
+        let query = SQLQuery::new(
+            "SELECT * FROM products WHERE title LIKE 'laptop%' OR title LIKE 'phone%'",
+        );
+        assert_eq!(
+            query.to_redis_query(),
+            "(@title:(laptop*) | @title:(phone*))"
+        );
+    }
+
+    #[test]
+    fn where_or_with_date() {
+        let query = SQLQuery::new(
+            "SELECT * FROM events WHERE created_at < '2024-01-01' OR created_at > '2024-12-31'",
+        );
+        let result = query.to_redis_query();
+        // 2024-12-31 = 1735603200
+        assert_eq!(
+            result,
+            "(@created_at:[-inf (1704067200] | @created_at:[(1735603200 +inf])"
+        );
     }
 }
