@@ -128,6 +128,7 @@ impl SemanticCache {
                 "vector_dimensions must be greater than zero".to_owned(),
             ));
         }
+        validate_filterable_fields(filterable_fields)?;
 
         let schema = semantic_cache_schema(&config.name, vector_dimensions, filterable_fields);
         let index = SearchIndex::from_json_value(schema, config.connection.redis_url.clone())?;
@@ -1213,6 +1214,58 @@ fn value_to_hash_string(value: &Value) -> String {
     }
 }
 
+/// Reserved field names that cannot be used as filterable field names.
+const RESERVED_SEMANTIC_FIELDS: &[&str] = &[
+    SEMANTIC_ENTRY_ID_FIELD,
+    SEMANTIC_PROMPT_FIELD,
+    SEMANTIC_RESPONSE_FIELD,
+    SEMANTIC_VECTOR_FIELD,
+    SEMANTIC_INSERTED_AT_FIELD,
+    SEMANTIC_UPDATED_AT_FIELD,
+    SEMANTIC_METADATA_FIELD,
+    SEMANTIC_KEY_FIELD,
+    "vector_distance",
+];
+
+fn validate_filterable_fields(fields: &[Value]) -> Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    for field in fields {
+        let name = field
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let field_type = field
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+
+        if name.is_empty() {
+            return Err(crate::Error::InvalidInput(
+                "filterable field must have a non-empty 'name'".to_owned(),
+            ));
+        }
+
+        if RESERVED_SEMANTIC_FIELDS.contains(&name) {
+            return Err(crate::Error::InvalidInput(format!(
+                "{name} is a reserved field name for the semantic cache schema"
+            )));
+        }
+
+        if !seen.insert(name.to_owned()) {
+            return Err(crate::Error::InvalidInput(format!(
+                "duplicate field name: {name}. Field names must be unique"
+            )));
+        }
+
+        if !matches!(field_type, "tag" | "text" | "numeric" | "geo") {
+            return Err(crate::Error::InvalidInput(format!(
+                "invalid filterable field type: '{field_type}' for field '{name}'"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn validate_distance_threshold(distance_threshold: f32) -> Result<()> {
     if !(0.0..=2.0).contains(&distance_threshold) {
         return Err(crate::Error::InvalidInput(format!(
@@ -1324,7 +1377,12 @@ fn number_value(value: f64) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{CacheConfig, EmbeddingsCache, hashify};
+    use serde_json::json;
+
+    use super::{
+        CacheConfig, EmbeddingsCache, hashify, validate_distance_threshold,
+        validate_filterable_fields, validate_metadata,
+    };
 
     #[test]
     fn hashify_matches_expected_sha256() {
@@ -1342,5 +1400,104 @@ mod tests {
             key,
             "embedcache:368dacc611e96e4189a9809faaca1a70b3c3306352bbcfc9ab6291359a5dfca0"
         );
+    }
+
+    #[test]
+    fn entry_id_is_deterministic() {
+        let cache = EmbeddingsCache::new(CacheConfig::default());
+        let id1 = cache.make_entry_id("Hello world", "text-embedding-ada-002");
+        let id2 = cache.make_entry_id("Hello world", "text-embedding-ada-002");
+        assert_eq!(id1, id2);
+
+        let different = cache.make_entry_id("Different text", "text-embedding-ada-002");
+        assert_ne!(id1, different);
+    }
+
+    #[test]
+    fn entry_id_different_inputs_differ() {
+        let cache = EmbeddingsCache::new(CacheConfig::default());
+        let id_a = cache.make_entry_id("What is machine learning?", "text-embedding-ada-002");
+        let id_b = cache.make_entry_id("How do neural networks work?", "text-embedding-ada-002");
+        assert_ne!(id_a, id_b);
+    }
+
+    #[test]
+    fn cache_key_includes_cache_name() {
+        let cache_a = EmbeddingsCache::new(CacheConfig::new("cache_a", "redis://localhost:6379"));
+        let cache_b = EmbeddingsCache::new(CacheConfig::new("cache_b", "redis://localhost:6379"));
+        let key_a = cache_a.make_cache_key("hello", "model");
+        let key_b = cache_b.make_cache_key("hello", "model");
+        assert!(key_a.starts_with("cache_a:"));
+        assert!(key_b.starts_with("cache_b:"));
+        assert_ne!(key_a, key_b);
+    }
+
+    #[test]
+    fn distance_threshold_out_of_range() {
+        assert!(validate_distance_threshold(-1.0).is_err());
+        assert!(validate_distance_threshold(2.5).is_err());
+        assert!(validate_distance_threshold(0.0).is_ok());
+        assert!(validate_distance_threshold(1.0).is_ok());
+        assert!(validate_distance_threshold(2.0).is_ok());
+    }
+
+    #[test]
+    fn metadata_must_be_object() {
+        assert!(validate_metadata(&json!("string")).is_err());
+        assert!(validate_metadata(&json!([1, 2])).is_err());
+        assert!(validate_metadata(&json!(42)).is_err());
+        assert!(validate_metadata(&json!({"key": "value"})).is_ok());
+        assert!(validate_metadata(&json!({})).is_ok());
+    }
+
+    #[test]
+    fn filterable_fields_reserved_name() {
+        let fields = vec![json!({"name": "metadata", "type": "tag"})];
+        let err = validate_filterable_fields(&fields).unwrap_err();
+        assert!(err.to_string().contains("reserved"));
+    }
+
+    #[test]
+    fn filterable_fields_duplicate_name() {
+        let fields = vec![
+            json!({"name": "label", "type": "tag"}),
+            json!({"name": "label", "type": "tag"}),
+        ];
+        let err = validate_filterable_fields(&fields).unwrap_err();
+        assert!(err.to_string().contains("duplicate"));
+    }
+
+    #[test]
+    fn filterable_fields_invalid_type() {
+        let fields = vec![
+            json!({"name": "label", "type": "tag"}),
+            json!({"name": "test", "type": "nothing"}),
+        ];
+        let err = validate_filterable_fields(&fields).unwrap_err();
+        assert!(err.to_string().contains("invalid"));
+    }
+
+    #[test]
+    fn filterable_fields_valid() {
+        let fields = vec![
+            json!({"name": "label", "type": "tag"}),
+            json!({"name": "score", "type": "numeric"}),
+        ];
+        assert!(validate_filterable_fields(&fields).is_ok());
+    }
+
+    #[test]
+    fn default_embeddings_cache_name() {
+        let cache = EmbeddingsCache::default();
+        assert_eq!(cache.config.name, "embedcache");
+        assert!(cache.config.ttl_seconds.is_none());
+    }
+
+    #[test]
+    fn custom_embeddings_cache_config() {
+        let config = CacheConfig::new("custom_cache", "redis://localhost:6379").with_ttl(60);
+        let cache = EmbeddingsCache::new(config);
+        assert_eq!(cache.config.name, "custom_cache");
+        assert_eq!(cache.config.ttl_seconds, Some(60));
     }
 }

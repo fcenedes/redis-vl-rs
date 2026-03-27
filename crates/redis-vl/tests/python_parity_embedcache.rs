@@ -346,3 +346,146 @@ async fn python_test_async_ttl_expiration() {
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert!(!cache.aexists_by_key(&key).await.expect("aexists by key"));
 }
+
+/// Mirrors Python `test_batch_with_ttl` — mset with default TTL and custom
+/// TTL override.
+#[test]
+fn python_test_batch_with_ttl() {
+    let Some(cache) = create_cache(Some(2)) else {
+        return;
+    };
+    let items = sample_items();
+
+    // Store with default TTL of 2 seconds
+    let keys = cache.mset(&items, None).expect("mset should succeed");
+    let exists = cache
+        .mexists_by_keys(keys.iter().map(String::as_str))
+        .expect("mexists by keys");
+    assert!(exists.iter().all(|&e| e));
+
+    thread::sleep(Duration::from_secs(3));
+    let after_expire = cache
+        .mexists_by_keys(keys.iter().map(String::as_str))
+        .expect("mexists by keys after TTL");
+    assert!(after_expire.iter().all(|&e| !e));
+
+    // Store with custom TTL override of 5 seconds
+    let keys = cache.mset(&items, Some(5)).expect("mset with custom ttl");
+    thread::sleep(Duration::from_secs(3));
+    let still_present = cache
+        .mexists_by_keys(keys.iter().map(String::as_str))
+        .expect("mexists by keys after 3s with 5s ttl");
+    assert!(still_present.iter().all(|&e| e));
+
+    cache.clear().expect("clear");
+}
+
+/// Mirrors Python `test_large_batch_operations` — 100 items batch test.
+#[test]
+fn python_test_large_batch_operations() {
+    let Some(cache) = create_cache(None) else {
+        return;
+    };
+
+    let large_batch: Vec<EmbeddingCacheItem> = (0..100)
+        .map(|i| EmbeddingCacheItem {
+            content: format!("Sample text {i}"),
+            model_name: "test-model".to_owned(),
+            embedding: vec![i as f32 / 100.0; 5],
+            metadata: Some(json!({"index": i})),
+        })
+        .collect();
+
+    let keys = cache.mset(&large_batch, None).expect("mset 100 items");
+    assert_eq!(keys.len(), 100);
+
+    let results = cache
+        .mget_by_keys(keys.iter().map(String::as_str))
+        .expect("mget by keys");
+    assert_eq!(results.len(), 100);
+    assert!(results.iter().all(Option::is_some));
+
+    let contents: Vec<&str> = large_batch.iter().map(|i| i.content.as_str()).collect();
+    let results_by_content = cache
+        .mget(contents.iter().copied(), "test-model")
+        .expect("mget by content");
+    assert_eq!(results_by_content.len(), 100);
+    assert!(results_by_content.iter().all(Option::is_some));
+
+    let exists = cache
+        .mexists_by_keys(keys.iter().map(String::as_str))
+        .expect("mexists");
+    assert_eq!(exists.len(), 100);
+    assert!(exists.iter().all(|&e| e));
+
+    // Delete first half
+    cache
+        .mdrop_by_keys(keys[..50].iter().map(String::as_str))
+        .expect("mdrop first half");
+    for (i, key) in keys.iter().enumerate() {
+        let exists = cache.exists_by_key(key).expect("exists check");
+        if i < 50 {
+            assert!(!exists, "key {i} should be deleted");
+        } else {
+            assert!(exists, "key {i} should still exist");
+        }
+    }
+
+    cache.clear().expect("clear");
+}
+
+/// Mirrors Python `test_mget_by_keys` with mixed existing/non-existing keys.
+#[test]
+fn python_test_mget_by_keys_mixed() {
+    let Some(cache) = create_cache(None) else {
+        return;
+    };
+    let items = sample_items();
+    let keys = cache.mset(&items, None).expect("mset");
+
+    let non_existent_key = format!("{}_nonexistent", cache.config.name);
+    let mixed_keys: Vec<String> = vec![keys[0].clone(), non_existent_key, keys[1].clone()];
+    let results = cache
+        .mget_by_keys(mixed_keys.iter().map(String::as_str))
+        .expect("mget by mixed keys");
+    assert_eq!(results.len(), 3);
+    assert!(results[0].is_some());
+    assert!(results[1].is_none());
+    assert!(results[2].is_some());
+
+    cache.clear().expect("clear");
+}
+
+/// Mirrors Python `test_entry_id_consistency` — entry IDs are consistent
+/// between make_entry_id and the key returned by set.
+#[test]
+fn python_test_entry_id_consistency() {
+    let Some(cache) = create_cache(None) else {
+        return;
+    };
+    let sample = &sample_items()[0];
+
+    let expected_id = cache.make_entry_id(&sample.content, &sample.model_name);
+    let key = cache
+        .set(
+            &sample.content,
+            &sample.model_name,
+            &sample.embedding,
+            sample.metadata.clone(),
+            None,
+        )
+        .expect("set");
+
+    // Key should be cache_name:entry_id
+    let parts: Vec<&str> = key.splitn(2, ':').collect();
+    assert_eq!(parts.len(), 2);
+    assert_eq!(parts[1], expected_id);
+
+    let result = cache
+        .get_by_key(&key)
+        .expect("get by key")
+        .expect("entry exists");
+    assert_eq!(result.entry_id, expected_id);
+
+    cache.clear().expect("clear");
+}

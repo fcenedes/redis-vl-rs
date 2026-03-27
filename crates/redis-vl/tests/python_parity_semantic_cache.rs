@@ -362,3 +362,475 @@ async fn python_test_async_semantic_cache_update_and_clear() {
 
     cache.adelete().await.expect("adelete should succeed");
 }
+
+/// Mirrors Python `test_check_no_match` — empty results for unmatched queries.
+#[test]
+fn python_test_check_no_match() {
+    let Some(cache) = build_cache(None) else {
+        return;
+    };
+
+    let hits = cache
+        .check(Some("some random sentence"), None, 1, None, None, None)
+        .expect("check should succeed");
+    assert!(hits.is_empty());
+
+    cache.delete().expect("delete");
+}
+
+/// Mirrors Python `test_check_invalid_input` — no prompt or vector raises error.
+#[test]
+fn python_test_check_invalid_input() {
+    let Some(cache) = build_cache(None) else {
+        return;
+    };
+
+    let err = cache.check(None, None, 1, None, None, None);
+    assert!(err.is_err());
+
+    cache.delete().expect("delete");
+}
+
+/// Mirrors Python `test_store_with_invalid_metadata` — non-object metadata
+/// is rejected.
+#[test]
+fn python_test_store_with_invalid_metadata() {
+    let Some(cache) = build_cache(None) else {
+        return;
+    };
+
+    let err = cache.store(
+        "prompt",
+        "response",
+        Some(&embed_text("prompt")),
+        Some(json!("string_metadata")),
+        None,
+        None,
+    );
+    assert!(err.is_err());
+
+    cache.delete().expect("delete");
+}
+
+/// Mirrors Python `test_store_with_empty_metadata` — empty object is allowed.
+#[test]
+fn python_test_store_with_empty_metadata() {
+    let Some(cache) = build_cache(None) else {
+        return;
+    };
+
+    cache
+        .store(
+            "empty metadata prompt",
+            "empty metadata response",
+            Some(&embed_text("empty metadata prompt")),
+            Some(json!({})),
+            None,
+            None,
+        )
+        .expect("store with empty metadata should succeed");
+
+    let hits = cache
+        .check(
+            Some("empty metadata prompt"),
+            None,
+            1,
+            Some(&["metadata"]),
+            None,
+            Some(0.4),
+        )
+        .expect("check should succeed");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0]["metadata"], json!({}));
+
+    cache.delete().expect("delete");
+}
+
+/// Mirrors Python `test_distance_threshold` / `test_distance_threshold_out_of_range`.
+#[test]
+fn python_test_distance_threshold_validation() {
+    let Some(mut cache) = build_cache(None) else {
+        return;
+    };
+
+    cache.set_threshold(0.1).expect("valid threshold");
+    assert!((cache.distance_threshold - 0.1).abs() < f32::EPSILON);
+
+    let err = cache.set_threshold(-1.0);
+    assert!(err.is_err());
+
+    cache.delete().expect("delete");
+}
+
+/// Mirrors Python `test_vector_size` — dimension mismatch is rejected.
+#[test]
+fn python_test_vector_size_mismatch() {
+    let Some(cache) = build_cache(None) else {
+        return;
+    };
+
+    // Store with correct size
+    cache
+        .store(
+            "test prompt",
+            "test response",
+            Some(&[1.0, 0.0, 0.0]),
+            None,
+            None,
+            None,
+        )
+        .expect("store with correct dims");
+
+    // Store with wrong size
+    let err = cache.store(
+        "test prompt",
+        "test response",
+        Some(&[1.0, 0.0]),
+        None,
+        None,
+        None,
+    );
+    assert!(err.is_err());
+
+    // Check with wrong size
+    let err = cache.check(None, Some(&[1.0, 0.0]), 1, None, None, None);
+    assert!(err.is_err());
+
+    cache.delete().expect("delete");
+}
+
+/// Mirrors Python `test_drop_documents` — dropping multiple entries by id.
+#[test]
+fn python_test_drop_multiple_documents() {
+    let Some(cache) = build_cache(None) else {
+        return;
+    };
+
+    let prompts = [
+        "This is a test prompt.",
+        "This is also test prompt.",
+        "This is another test prompt.",
+    ];
+    let responses = [
+        "This is a test response.",
+        "This is also test response.",
+        "This is another test response.",
+    ];
+    for (prompt, response) in prompts.iter().zip(responses.iter()) {
+        cache
+            .store(
+                prompt,
+                response,
+                Some(&embed_text(prompt)),
+                None,
+                None,
+                None,
+            )
+            .expect("store should succeed");
+    }
+
+    let hits = cache
+        .check(
+            Some("This is another test prompt."),
+            None,
+            3,
+            None,
+            None,
+            Some(0.5),
+        )
+        .expect("check should succeed");
+    assert!(hits.len() >= 2);
+
+    let ids: Vec<String> = hits[..2]
+        .iter()
+        .map(|h| h["entry_id"].as_str().unwrap().to_owned())
+        .collect();
+    cache.drop_ids(&ids).expect("drop ids");
+
+    let after = cache
+        .check(
+            Some("This is another test prompt."),
+            None,
+            3,
+            None,
+            None,
+            Some(0.5),
+        )
+        .expect("recheck");
+    assert_eq!(after.len(), hits.len() - 2);
+
+    cache.delete().expect("delete");
+}
+
+/// Mirrors Python `test_cache_bad_filters` — reserved names, duplicates,
+/// and invalid types are rejected.
+#[test]
+fn python_test_cache_bad_filters() {
+    if !integration_enabled() {
+        return;
+    }
+
+    // Invalid field type
+    let config = CacheConfig::new("bad_filter_type", redis_url());
+    let err = SemanticCache::with_filterable_fields(
+        config,
+        0.2,
+        3,
+        &[
+            json!({"name": "label", "type": "tag"}),
+            json!({"name": "test", "type": "nothing"}),
+        ],
+    );
+    assert!(err.is_err());
+
+    // Duplicate field name
+    let config = CacheConfig::new("bad_filter_dup", redis_url());
+    let err = SemanticCache::with_filterable_fields(
+        config,
+        0.2,
+        3,
+        &[
+            json!({"name": "label", "type": "tag"}),
+            json!({"name": "label", "type": "tag"}),
+        ],
+    );
+    assert!(err.is_err());
+
+    // Reserved field name
+    let config = CacheConfig::new("bad_filter_reserved", redis_url());
+    let err = SemanticCache::with_filterable_fields(
+        config,
+        0.2,
+        3,
+        &[
+            json!({"name": "label", "type": "tag"}),
+            json!({"name": "metadata", "type": "tag"}),
+        ],
+    );
+    assert!(err.is_err());
+}
+
+/// Mirrors Python `test_cache_with_filters` — filterable fields appear in schema.
+#[test]
+fn python_test_cache_with_filters() {
+    if !integration_enabled() {
+        return;
+    }
+
+    let id = std::sync::atomic::AtomicU64::new(100).fetch_add(1, Ordering::Relaxed);
+    let config = CacheConfig::new(format!("parity_filter_cache_{id}"), redis_url());
+    let cache = SemanticCache::with_filterable_fields(
+        config,
+        0.2,
+        3,
+        &[json!({"name": "label", "type": "tag"})],
+    )
+    .expect("should create cache with filters")
+    .with_vectorizer(CustomTextVectorizer::new(|text| Ok(embed_text(text))));
+
+    assert!(
+        cache
+            .index
+            .schema()
+            .fields
+            .iter()
+            .any(|f| f.name == "label")
+    );
+    cache.delete().expect("delete");
+}
+
+/// Mirrors Python `test_return_fields` — verify default and custom return fields.
+#[test]
+fn python_test_return_fields() {
+    let Some(cache) = build_cache(None) else {
+        return;
+    };
+
+    cache
+        .store(
+            "This is a test prompt.",
+            "This is a test response.",
+            Some(&embed_text("This is a test prompt.")),
+            None,
+            None,
+            None,
+        )
+        .expect("store");
+
+    // Check default return fields
+    let hits = cache
+        .check(
+            None,
+            Some(&embed_text("This is a test prompt.")),
+            1,
+            None,
+            None,
+            None,
+        )
+        .expect("check");
+    assert_eq!(hits.len(), 1);
+    let keys: std::collections::HashSet<&str> = hits[0].keys().map(String::as_str).collect();
+    assert!(keys.contains("key"));
+    assert!(keys.contains("entry_id"));
+    assert!(keys.contains("prompt"));
+    assert!(keys.contains("response"));
+    assert!(keys.contains("vector_distance"));
+    assert!(keys.contains("inserted_at"));
+    assert!(keys.contains("updated_at"));
+
+    // Check specific return fields
+    let fields = &["entry_id", "prompt", "response", "vector_distance"];
+    let hits = cache
+        .check(
+            None,
+            Some(&embed_text("This is a test prompt.")),
+            1,
+            Some(fields),
+            None,
+            None,
+        )
+        .expect("check with fields");
+    let keys: std::collections::HashSet<&str> = hits[0].keys().map(String::as_str).collect();
+    // key is always included
+    assert!(keys.contains("key"));
+    assert!(keys.contains("entry_id"));
+    assert!(keys.contains("prompt"));
+    assert!(!keys.contains("inserted_at"));
+    assert!(!keys.contains("updated_at"));
+
+    cache.delete().expect("delete");
+}
+
+/// Mirrors Python `test_multiple_items` — storing and checking multiple items.
+#[test]
+fn python_test_multiple_items() {
+    let Some(cache) = build_cache(None) else {
+        return;
+    };
+
+    let items = vec![
+        ("prompt1", "response1"),
+        ("prompt2", "response2"),
+        ("prompt3", "response3"),
+    ];
+
+    for (prompt, response) in &items {
+        cache
+            .store(prompt, response, None, None, None, None)
+            .expect("store should succeed");
+    }
+
+    for (prompt, expected_response) in &items {
+        let hits = cache
+            .check(Some(prompt), None, 1, None, None, None)
+            .expect("check");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0]["response"], json!(*expected_response));
+    }
+
+    cache.delete().expect("delete");
+}
+
+/// Mirrors Python `test_set_ttl` / `test_reset_ttl` — setting and clearing TTL.
+#[test]
+fn python_test_set_and_reset_ttl() {
+    let Some(mut cache) = build_cache(None) else {
+        return;
+    };
+
+    assert!(cache.ttl().is_none());
+    cache.set_ttl(Some(5));
+    assert_eq!(cache.ttl(), Some(5));
+    cache.set_ttl(None);
+    assert!(cache.ttl().is_none());
+
+    cache.delete().expect("delete");
+}
+
+/// Mirrors Python async TTL expiration test.
+#[tokio::test]
+async fn python_test_async_ttl_expiration() {
+    let Some(cache) = build_cache(Some(2)) else {
+        return;
+    };
+
+    cache
+        .astore(
+            "This is a test prompt.",
+            "This is a test response.",
+            Some(&embed_text("This is a test prompt.")),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("astore");
+
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let expired = cache
+        .acheck(
+            None,
+            Some(&embed_text("This is a test prompt.")),
+            1,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("acheck");
+    assert!(expired.is_empty());
+
+    cache.adelete().await.expect("adelete");
+}
+
+/// Mirrors Python async drop document test.
+#[tokio::test]
+async fn python_test_async_drop_document() {
+    let Some(cache) = build_cache(None) else {
+        return;
+    };
+
+    cache
+        .astore(
+            "This is a test prompt.",
+            "This is a test response.",
+            Some(&embed_text("This is a test prompt.")),
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("astore");
+
+    let hits = cache
+        .acheck(
+            None,
+            Some(&embed_text("This is a test prompt.")),
+            1,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("acheck");
+    assert_eq!(hits.len(), 1);
+
+    let entry_id = hits[0]["entry_id"].as_str().expect("entry_id").to_owned();
+    cache.adrop_ids(&[entry_id]).await.expect("adrop_ids");
+
+    let after = cache
+        .acheck(
+            None,
+            Some(&embed_text("This is a test prompt.")),
+            1,
+            None,
+            None,
+            None,
+        )
+        .await
+        .expect("acheck");
+    assert!(after.is_empty());
+
+    cache.adelete().await.expect("adelete");
+}
