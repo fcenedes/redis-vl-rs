@@ -1673,26 +1673,9 @@ impl QueryString for String {
 }
 
 #[cfg(feature = "sql")]
-/// SQL-like query representation for later parity work.
-#[derive(Debug, Clone)]
-pub struct SQLQuery {
-    sql: String,
-}
-
+mod sql;
 #[cfg(feature = "sql")]
-impl SQLQuery {
-    /// Creates an SQL query wrapper.
-    pub fn new(sql: impl Into<String>) -> Self {
-        Self { sql: sql.into() }
-    }
-}
-
-#[cfg(feature = "sql")]
-impl QueryString for SQLQuery {
-    fn to_redis_query(&self) -> String {
-        self.sql.clone()
-    }
-}
+pub use sql::{SQLQuery, SqlParam};
 
 #[cfg(test)]
 mod tests {

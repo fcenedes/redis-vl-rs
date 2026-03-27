@@ -38,6 +38,8 @@ pub use query::{
     QueryRender, QueryString, SortBy, SortDirection, TextQuery, Vector, VectorDtype, VectorInput,
     VectorQuery, VectorRangeQuery, VectorSearchMethod,
 };
+#[cfg(feature = "sql")]
+pub use query::{SQLQuery, SqlParam};
 pub use rerankers::{AsyncReranker, RerankDoc, RerankResult, Reranker};
 #[cfg(feature = "rerankers")]
 pub use rerankers::{CohereReranker, CohereRerankerConfig};
