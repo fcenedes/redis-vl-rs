@@ -8,6 +8,9 @@ use serde_json::json;
 
 static COUNTER: AtomicU64 = AtomicU64::new(1);
 
+/// The dimensionality used by the deterministic test vectorizer.
+const VECTOR_DIMENSIONS: usize = 3;
+
 fn integration_enabled() -> bool {
     std::env::var("REDISVL_RUN_INTEGRATION")
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
@@ -324,9 +327,9 @@ fn python_test_semantic_history_overwrite() {
     .expect("first create should succeed");
 
     history
-        .store("user", "hello world", None, None)
+        .store("hello world", "hello response")
         .expect("store should succeed");
-    assert_eq!(history.count(None).expect("count"), 1);
+    assert_eq!(history.count(None).expect("count"), 2);
 
     // Recreate with overwrite = true → should start fresh
     let history2 = SemanticMessageHistory::new_with_options(
