@@ -34,11 +34,11 @@ pub use query::{
     AggregateHybridQuery, CountQuery, FilterQuery, HybridCombinationMethod, HybridQuery,
     MultiVectorQuery, PageableQuery, QueryKind, QueryLimit, QueryParam, QueryParamValue,
     QueryRender, QueryString, SortBy, SortDirection, TextQuery, Vector, VectorQuery,
-    VectorRangeQuery,
+    VectorRangeQuery, VectorSearchMethod,
 };
 pub use schema::{
     Field, FieldKind, GeoFieldAttributes, IndexDefinition, IndexSchema, NumericFieldAttributes,
-    StorageType, TagFieldAttributes, TextFieldAttributes, TimestampFieldAttributes,
+    Prefix, StorageType, TagFieldAttributes, TextFieldAttributes, TimestampFieldAttributes,
     VectorAlgorithm, VectorDataType, VectorDistanceMetric, VectorFieldAttributes,
 };
 pub use vectorizers::{

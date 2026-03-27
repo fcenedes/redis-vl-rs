@@ -796,7 +796,8 @@ pub enum HybridCombinationMethod {
 }
 
 impl HybridCombinationMethod {
-    fn redis_name(self) -> &'static str {
+    /// Returns the Redis protocol name for this combination method.
+    pub fn redis_name(self) -> &'static str {
         match self {
             Self::Linear => "LINEAR",
             Self::Rrf => "RRF",
@@ -804,41 +805,166 @@ impl HybridCombinationMethod {
     }
 }
 
-/// Native Redis hybrid query.
+/// Vector search method for hybrid queries.
+#[derive(Debug, Clone, Copy)]
+pub enum VectorSearchMethod {
+    /// K-Nearest Neighbors search.
+    Knn,
+    /// Range-based search.
+    Range,
+}
+
+/// Native Redis hybrid query dispatched via `FT.HYBRID`.
+///
+/// This query combines text search and vector similarity search with
+/// configurable fusion methods. It requires Redis 8.4.0+ and produces
+/// `FT.HYBRID` commands (not `FT.SEARCH`).
+///
+/// # Example
+///
+/// ```
+/// use redis_vl::query::{HybridQuery, HybridCombinationMethod, Vector};
+///
+/// let query = HybridQuery::new(
+///     "a medical professional",
+///     "description",
+///     Vector::new(vec![0.1, 0.1, 0.5]),
+///     "user_embedding",
+/// )
+/// .with_num_results(10)
+/// .with_combination_method(HybridCombinationMethod::Rrf)
+/// .with_yield_combined_score_as("hybrid_score")
+/// .with_return_fields(["user", "age", "job"]);
+/// ```
 #[derive(Debug, Clone)]
 pub struct HybridQuery<'a> {
     text: String,
     text_field_name: String,
     vector: Vector<'a>,
     vector_field_name: String,
+    vector_param_name: String,
     num_results: usize,
-    combination_method: HybridCombinationMethod,
-    options: QueryOptions,
+    text_scorer: Option<String>,
+    yield_text_score_as: Option<String>,
+    vector_search_method: Option<VectorSearchMethod>,
+    knn_ef_runtime: Option<usize>,
+    range_radius: Option<f32>,
+    range_epsilon: Option<f32>,
+    yield_vsim_score_as: Option<String>,
+    filter_expression: Option<FilterExpression>,
+    combination_method: Option<HybridCombinationMethod>,
+    rrf_window: Option<usize>,
+    rrf_constant: Option<usize>,
+    linear_alpha: Option<f32>,
+    yield_combined_score_as: Option<String>,
+    return_fields: Vec<String>,
+    stopwords: Option<std::collections::HashSet<String>>,
+    text_weights: Option<std::collections::HashMap<String, f32>>,
 }
 
 impl<'a> HybridQuery<'a> {
-    /// Creates a hybrid query.
+    /// Creates a hybrid query with the given text, text field, vector, and vector field.
     pub fn new(
         text: impl Into<String>,
         text_field_name: impl Into<String>,
         vector: Vector<'a>,
         vector_field_name: impl Into<String>,
-        num_results: usize,
     ) -> Self {
         Self {
             text: text.into(),
             text_field_name: text_field_name.into(),
             vector,
             vector_field_name: vector_field_name.into(),
-            num_results,
-            combination_method: HybridCombinationMethod::Linear,
-            options: QueryOptions::with_num_results(num_results),
+            vector_param_name: "vector".to_owned(),
+            num_results: 10,
+            text_scorer: None,
+            yield_text_score_as: None,
+            vector_search_method: None,
+            knn_ef_runtime: None,
+            range_radius: None,
+            range_epsilon: None,
+            yield_vsim_score_as: None,
+            filter_expression: None,
+            combination_method: None,
+            rrf_window: None,
+            rrf_constant: None,
+            linear_alpha: None,
+            yield_combined_score_as: None,
+            return_fields: Vec::new(),
+            stopwords: None,
+            text_weights: None,
         }
     }
 
+    /// Sets the number of results to return.
+    pub fn with_num_results(mut self, num_results: usize) -> Self {
+        self.num_results = num_results;
+        self
+    }
+
+    /// Sets the text scorer algorithm (e.g. `"BM25STD"`, `"TFIDF"`, `"TFIDF.DOCNORM"`).
+    pub fn with_text_scorer(mut self, scorer: impl Into<String>) -> Self {
+        self.text_scorer = Some(scorer.into());
+        self
+    }
+
+    /// Sets the alias for the text search score in results.
+    pub fn with_yield_text_score_as(mut self, alias: impl Into<String>) -> Self {
+        self.yield_text_score_as = Some(alias.into());
+        self
+    }
+
+    /// Sets the vector search method to KNN with optional EF runtime.
+    pub fn with_knn(mut self, ef_runtime: Option<usize>) -> Self {
+        self.vector_search_method = Some(VectorSearchMethod::Knn);
+        self.knn_ef_runtime = ef_runtime;
+        self
+    }
+
+    /// Sets the vector search method to RANGE.
+    pub fn with_range(mut self, radius: f32, epsilon: Option<f32>) -> Self {
+        self.vector_search_method = Some(VectorSearchMethod::Range);
+        self.range_radius = Some(radius);
+        self.range_epsilon = epsilon;
+        self
+    }
+
+    /// Sets the alias for the vector similarity score in results.
+    pub fn with_yield_vsim_score_as(mut self, alias: impl Into<String>) -> Self {
+        self.yield_vsim_score_as = Some(alias.into());
+        self
+    }
+
+    /// Attaches a filter expression.
+    pub fn with_filter(mut self, filter_expression: FilterExpression) -> Self {
+        self.filter_expression = Some(filter_expression);
+        self
+    }
+
     /// Selects the hybrid combination method.
-    pub fn with_combination_method(mut self, combination_method: HybridCombinationMethod) -> Self {
-        self.combination_method = combination_method;
+    pub fn with_combination_method(mut self, method: HybridCombinationMethod) -> Self {
+        self.combination_method = Some(method);
+        self
+    }
+
+    /// Sets RRF parameters.
+    pub fn with_rrf(mut self, window: Option<usize>, constant: Option<usize>) -> Self {
+        self.combination_method = Some(HybridCombinationMethod::Rrf);
+        self.rrf_window = window;
+        self.rrf_constant = constant;
+        self
+    }
+
+    /// Sets LINEAR combination with an alpha weight for the text score.
+    pub fn with_linear(mut self, alpha: f32) -> Self {
+        self.combination_method = Some(HybridCombinationMethod::Linear);
+        self.linear_alpha = Some(alpha);
+        self
+    }
+
+    /// Sets the alias for the combined score in results.
+    pub fn with_yield_combined_score_as(mut self, alias: impl Into<String>) -> Self {
+        self.yield_combined_score_as = Some(alias.into());
         self
     }
 
@@ -848,19 +974,25 @@ impl<'a> HybridQuery<'a> {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        self.options.return_fields = return_fields.into_iter().map(Into::into).collect();
+        self.return_fields = return_fields.into_iter().map(Into::into).collect();
         self
     }
 
-    /// Updates the query limit.
-    pub fn paging(mut self, offset: usize, num: usize) -> Self {
-        self.options.limit = QueryLimit { offset, num };
+    /// Sets stopwords to filter from the query text.
+    pub fn with_stopwords(mut self, stopwords: std::collections::HashSet<String>) -> Self {
+        self.stopwords = Some(stopwords);
         self
     }
 
-    /// Sets the query dialect.
-    pub fn with_dialect(mut self, dialect: u32) -> Self {
-        self.options.dialect = dialect;
+    /// Sets word weights for the text search.
+    pub fn with_text_weights(mut self, weights: std::collections::HashMap<String, f32>) -> Self {
+        self.text_weights = Some(weights);
+        self
+    }
+
+    /// Sets the parameter name used for the vector blob.
+    pub fn with_vector_param_name(mut self, name: impl Into<String>) -> Self {
+        self.vector_param_name = name.into();
         self
     }
 
@@ -868,43 +1000,144 @@ impl<'a> HybridQuery<'a> {
     pub fn vector(&self) -> &Vector<'a> {
         &self.vector
     }
-}
 
-impl QueryString for HybridQuery<'_> {
-    fn to_redis_query(&self) -> String {
-        format!(
-            "@{}:({})=>[KNN {} @{} $vector AS vector_distance HYBRID_POLICY {}]",
-            self.text_field_name,
-            self.text,
-            self.num_results,
-            self.vector_field_name,
-            self.combination_method.redis_name()
-        )
+    /// Builds the full-text query string, applying stopwords if configured.
+    fn build_query_string(&self) -> String {
+        let mut text = self.text.clone();
+
+        // Apply stopwords
+        if let Some(stopwords) = &self.stopwords {
+            if !stopwords.is_empty() {
+                let words: Vec<&str> = text.split_whitespace().collect();
+                let filtered: Vec<&str> = words
+                    .into_iter()
+                    .filter(|w| !stopwords.contains(&w.to_lowercase()))
+                    .collect();
+                text = filtered.join(" ");
+            }
+        }
+
+        // Apply word weights
+        if let Some(weights) = &self.text_weights {
+            if !weights.is_empty() {
+                let words: Vec<String> = text
+                    .split_whitespace()
+                    .map(|w| {
+                        if let Some(weight) = weights.get(w) {
+                            format!("{}=>{{{}}}", w, weight)
+                        } else {
+                            w.to_owned()
+                        }
+                    })
+                    .collect();
+                text = words.join(" ");
+            }
+        }
+
+        format!("@{}:({})", self.text_field_name, text)
     }
 
-    fn params(&self) -> Vec<QueryParam> {
-        vec![QueryParam {
-            name: "vector".to_owned(),
-            value: QueryParamValue::Binary(self.vector.to_bytes().to_vec()),
-        }]
-    }
+    /// Builds an `FT.HYBRID` command for this query.
+    ///
+    /// The command targets the given `index_name` and encodes all hybrid
+    /// query clauses (QUERY, VSIM, COMBINE_METHOD, LOAD, LIMIT).
+    pub fn build_cmd(&self, index_name: &str) -> redis::Cmd {
+        let mut cmd = redis::cmd("FT.HYBRID");
+        cmd.arg(index_name);
 
-    fn return_fields(&self) -> Vec<String> {
-        self.options.return_fields.clone()
-    }
+        // QUERY clause
+        let query_string = self.build_query_string();
+        cmd.arg("QUERY").arg(&query_string);
 
-    fn limit(&self) -> Option<QueryLimit> {
-        Some(self.options.limit)
-    }
+        if let Some(scorer) = &self.text_scorer {
+            cmd.arg("SCORER").arg(scorer);
+        }
+        if let Some(alias) = &self.yield_text_score_as {
+            cmd.arg("YIELD_SCORE_AS").arg(alias);
+        }
 
-    fn dialect(&self) -> u32 {
-        self.options.dialect
-    }
-}
+        // VSIM clause
+        cmd.arg("VSIM")
+            .arg(format!("@{}", self.vector_field_name))
+            .arg(format!("${}", self.vector_param_name));
 
-impl PageableQuery for HybridQuery<'_> {
-    fn paged(&self, offset: usize, num: usize) -> Self {
-        self.clone().paging(offset, num)
+        if let Some(method) = self.vector_search_method {
+            match method {
+                VectorSearchMethod::Knn => {
+                    cmd.arg("SEARCH_METHOD").arg("KNN");
+                    cmd.arg("K").arg(self.num_results);
+                    if let Some(ef) = self.knn_ef_runtime {
+                        cmd.arg("EF_RUNTIME").arg(ef);
+                    }
+                }
+                VectorSearchMethod::Range => {
+                    cmd.arg("SEARCH_METHOD").arg("RANGE");
+                    if let Some(radius) = self.range_radius {
+                        cmd.arg("RADIUS").arg(radius);
+                    }
+                    if let Some(epsilon) = self.range_epsilon {
+                        cmd.arg("EPSILON").arg(epsilon);
+                    }
+                }
+            }
+        }
+
+        if let Some(filter) = &self.filter_expression {
+            let filter_str = filter.to_redis_syntax();
+            if filter_str != "*" {
+                cmd.arg("FILTER").arg(&filter_str);
+            }
+        }
+
+        if let Some(alias) = &self.yield_vsim_score_as {
+            cmd.arg("YIELD_SCORE_AS").arg(alias);
+        }
+
+        // COMBINE_METHOD clause
+        if let Some(method) = &self.combination_method {
+            cmd.arg("COMBINE_METHOD").arg(method.redis_name());
+
+            match method {
+                HybridCombinationMethod::Rrf => {
+                    if let Some(window) = self.rrf_window {
+                        cmd.arg("WINDOW").arg(window);
+                    }
+                    if let Some(constant) = self.rrf_constant {
+                        cmd.arg("CONSTANT").arg(constant);
+                    }
+                }
+                HybridCombinationMethod::Linear => {
+                    if let Some(alpha) = self.linear_alpha {
+                        cmd.arg("ALPHA").arg(alpha);
+                        cmd.arg("BETA").arg(1.0 - alpha);
+                    }
+                }
+            }
+
+            if let Some(alias) = &self.yield_combined_score_as {
+                cmd.arg("YIELD_SCORE_AS").arg(alias);
+            }
+        }
+
+        // PARAMS substitution for vector blob
+        cmd.arg("PARAMS")
+            .arg(2)
+            .arg(&self.vector_param_name)
+            .arg(self.vector.to_bytes().as_ref());
+
+        // LOAD (return fields)
+        if !self.return_fields.is_empty() {
+            cmd.arg("LOAD");
+            cmd.arg(self.return_fields.len());
+            for field in &self.return_fields {
+                cmd.arg(format!("@{}", field));
+            }
+        }
+
+        // LIMIT
+        cmd.arg("LIMIT").arg(0).arg(self.num_results);
+
+        cmd
     }
 }
 
@@ -920,31 +1153,14 @@ impl<'a> AggregateHybridQuery<'a> {
         Self { inner }
     }
 
+    /// Returns a reference to the inner hybrid query.
+    pub fn inner(&self) -> &HybridQuery<'a> {
+        &self.inner
+    }
+
     /// Returns the inner vector.
     pub fn vector(&self) -> &Vector<'a> {
         self.inner.vector()
-    }
-}
-
-impl QueryString for AggregateHybridQuery<'_> {
-    fn to_redis_query(&self) -> String {
-        self.inner.to_redis_query()
-    }
-
-    fn params(&self) -> Vec<QueryParam> {
-        self.inner.params()
-    }
-
-    fn return_fields(&self) -> Vec<String> {
-        self.inner.return_fields()
-    }
-
-    fn limit(&self) -> Option<QueryLimit> {
-        self.inner.limit()
-    }
-
-    fn dialect(&self) -> u32 {
-        self.inner.dialect()
     }
 }
 
@@ -1046,8 +1262,8 @@ impl QueryString for SQLQuery {
 #[cfg(test)]
 mod tests {
     use super::{
-        CountQuery, FilterQuery, HybridQuery, PageableQuery, QueryString, SortDirection, TextQuery,
-        Vector, VectorQuery, VectorRangeQuery,
+        CountQuery, FilterQuery, HybridCombinationMethod, HybridQuery, PageableQuery, QueryString,
+        SortDirection, TextQuery, Vector, VectorQuery, VectorRangeQuery,
     };
     use crate::filter::{Num, Tag};
 
@@ -1067,16 +1283,121 @@ mod tests {
     }
 
     #[test]
-    fn hybrid_query_should_render_policy() {
+    fn hybrid_query_should_build_ft_hybrid_cmd_like_python_hybrid_query() {
         let query = HybridQuery::new(
-            "hello",
-            "body",
-            Vector::new(vec![1.0, 2.0]),
-            "embedding",
-            10,
-        );
+            "a medical professional",
+            "description",
+            Vector::new(vec![0.1, 0.1, 0.5]),
+            "user_embedding",
+        )
+        .with_num_results(10)
+        .with_combination_method(HybridCombinationMethod::Rrf)
+        .with_yield_combined_score_as("hybrid_score")
+        .with_return_fields(["user", "age", "job"]);
 
-        assert!(query.to_redis_query().contains("HYBRID_POLICY"));
+        let cmd = query.build_cmd("my_index");
+        let packed = cmd.get_packed_command();
+        let cmd_str = String::from_utf8_lossy(&packed);
+
+        assert!(cmd_str.contains("FT.HYBRID"));
+        assert!(cmd_str.contains("my_index"));
+        assert!(cmd_str.contains("@description:(a medical professional)"));
+        assert!(cmd_str.contains("COMBINE_METHOD"));
+        assert!(cmd_str.contains("RRF"));
+        assert!(cmd_str.contains("YIELD_SCORE_AS"));
+        assert!(cmd_str.contains("hybrid_score"));
+    }
+
+    #[test]
+    fn hybrid_query_with_rrf_params_like_python_hybrid_query_rrf() {
+        let query = HybridQuery::new(
+            "search text",
+            "content",
+            Vector::new(vec![0.5, 0.5]),
+            "vec_field",
+        )
+        .with_rrf(Some(100), Some(10));
+
+        let cmd = query.build_cmd("idx");
+        let packed = cmd.get_packed_command();
+        let cmd_str = String::from_utf8_lossy(&packed);
+
+        assert!(cmd_str.contains("COMBINE_METHOD"));
+        assert!(cmd_str.contains("RRF"));
+        assert!(cmd_str.contains("WINDOW"));
+        assert!(cmd_str.contains("CONSTANT"));
+    }
+
+    #[test]
+    fn hybrid_query_with_linear_alpha_like_python_hybrid_query_linear() {
+        let query =
+            HybridQuery::new("query text", "body", Vector::new(vec![1.0]), "vec").with_linear(0.3);
+
+        let cmd = query.build_cmd("idx");
+        let packed = cmd.get_packed_command();
+        let cmd_str = String::from_utf8_lossy(&packed);
+
+        assert!(cmd_str.contains("COMBINE_METHOD"));
+        assert!(cmd_str.contains("LINEAR"));
+        assert!(cmd_str.contains("ALPHA"));
+    }
+
+    #[test]
+    fn hybrid_query_with_filter_like_python_hybrid_query_filter() {
+        let filter = Tag::new("status").eq("active");
+        let query = HybridQuery::new("doctors", "description", Vector::new(vec![1.0, 2.0]), "vec")
+            .with_filter(filter);
+
+        let cmd = query.build_cmd("idx");
+        let packed = cmd.get_packed_command();
+        let cmd_str = String::from_utf8_lossy(&packed);
+
+        assert!(cmd_str.contains("FILTER"));
+        assert!(cmd_str.contains("@status:{active}"));
+    }
+
+    #[test]
+    fn hybrid_query_with_stopwords_and_weights_like_python_hybrid_query() {
+        use std::collections::{HashMap, HashSet};
+        let mut stopwords = HashSet::new();
+        stopwords.insert("the".to_owned());
+        stopwords.insert("a".to_owned());
+
+        let mut weights = HashMap::new();
+        weights.insert("doctor".to_owned(), 2.0_f32);
+
+        let query = HybridQuery::new(
+            "a doctor in the house",
+            "description",
+            Vector::new(vec![1.0]),
+            "vec",
+        )
+        .with_stopwords(stopwords)
+        .with_text_weights(weights);
+
+        let query_string = query.build_query_string();
+        // Stopwords "a" and "the" removed
+        assert!(!query_string.contains(" a "));
+        assert!(!query_string.contains(" the "));
+        assert!(query_string.contains("doctor"));
+        // Weight applied to "doctor"
+        assert!(query_string.contains("doctor=>{2}"));
+    }
+
+    #[test]
+    fn hybrid_query_with_text_scorer_like_python_hybrid_query() {
+        let query = HybridQuery::new("test", "body", Vector::new(vec![1.0]), "vec")
+            .with_text_scorer("BM25STD")
+            .with_yield_text_score_as("text_score");
+
+        let cmd = query.build_cmd("idx");
+        let packed = cmd.get_packed_command();
+        let cmd_str = String::from_utf8_lossy(&packed);
+
+        assert!(cmd_str.contains("SCORER"));
+        assert!(cmd_str.contains("BM25STD"));
+        assert!(cmd_str.contains("YIELD_SCORE_AS"));
+        assert!(cmd_str.contains("text_score"));
     }
 
     #[test]

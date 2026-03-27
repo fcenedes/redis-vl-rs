@@ -172,9 +172,17 @@ impl SearchIndex {
         &self.schema.index.name
     }
 
-    /// Returns the key prefix.
+    /// Returns the first (or only) key prefix.
+    ///
+    /// For multi-prefix indexes, returns the first prefix. Use [`prefixes()`]
+    /// to access all configured prefixes.
     pub fn prefix(&self) -> &str {
-        &self.schema.index.prefix
+        self.schema.index.prefix.first()
+    }
+
+    /// Returns all key prefixes configured for this index.
+    pub fn prefixes(&self) -> Vec<&str> {
+        self.schema.index.prefix.all()
     }
 
     /// Returns the separator between prefix and identifier.
@@ -195,12 +203,15 @@ impl SearchIndex {
     /// Builds an `FT.CREATE` command for the current schema.
     pub fn create_cmd(&self) -> redis::Cmd {
         let mut cmd = redis::cmd("FT.CREATE");
+        let prefixes = self.schema.index.prefix.all();
         cmd.arg(&self.schema.index.name)
             .arg("ON")
             .arg(self.schema.index.storage_type.redis_name())
             .arg("PREFIX")
-            .arg(1)
-            .arg(&self.schema.index.prefix);
+            .arg(prefixes.len());
+        for pfx in &prefixes {
+            cmd.arg(*pfx);
+        }
 
         if !self.schema.index.stopwords.is_empty() {
             cmd.arg("STOPWORDS").arg(self.schema.index.stopwords.len());
@@ -646,6 +657,31 @@ impl SearchIndex {
         Ok(batches)
     }
 
+    /// Executes a [`HybridQuery`] via `FT.HYBRID` and returns parsed search
+    /// results.
+    ///
+    /// Requires Redis 8.4.0+ with the hybrid search capability.
+    pub fn hybrid_search(&self, query: &crate::query::HybridQuery<'_>) -> Result<SearchResult> {
+        let client = self.connection.client()?;
+        let mut connection = client.get_connection()?;
+        let cmd = query.build_cmd(self.name());
+        let value: redis::Value = cmd.query(&mut connection)?;
+        parse_search_result(value)
+    }
+
+    /// Executes a [`HybridQuery`] via `FT.HYBRID` and returns processed
+    /// documents.
+    pub fn hybrid_query(&self, query: &crate::query::HybridQuery<'_>) -> Result<QueryOutput> {
+        let results = self.hybrid_search(query)?;
+        let mut documents = Vec::with_capacity(results.docs.len());
+        for document in results.docs {
+            let mut map = document.into_map();
+            map.remove("payload");
+            documents.push(map);
+        }
+        Ok(QueryOutput::Documents(documents))
+    }
+
     /// Executes a query and returns the raw Redis response.
     pub fn search_raw<Q>(&self, query: &Q) -> Result<redis::Value>
     where
@@ -783,9 +819,17 @@ impl AsyncSearchIndex {
         &self.schema.index.name
     }
 
-    /// Returns the key prefix.
+    /// Returns the first (or only) key prefix.
+    ///
+    /// For multi-prefix indexes, returns the first prefix. Use [`prefixes()`]
+    /// to access all configured prefixes.
     pub fn prefix(&self) -> &str {
-        &self.schema.index.prefix
+        self.schema.index.prefix.first()
+    }
+
+    /// Returns all key prefixes configured for this index.
+    pub fn prefixes(&self) -> Vec<&str> {
+        self.schema.index.prefix.all()
     }
 
     /// Returns the separator between prefix and identifier.
@@ -1236,6 +1280,34 @@ impl AsyncSearchIndex {
             .query_async(&mut connection)
             .await?;
         Ok(value)
+    }
+
+    /// Executes a [`HybridQuery`] asynchronously via `FT.HYBRID` and returns
+    /// parsed search results.
+    ///
+    /// Requires Redis 8.4.0+ with the hybrid search capability.
+    pub async fn hybrid_search(
+        &self,
+        query: &crate::query::HybridQuery<'_>,
+    ) -> Result<SearchResult> {
+        let client = self.connection.client()?;
+        let mut connection = client.get_multiplexed_async_connection().await?;
+        let cmd = query.build_cmd(self.name());
+        let value: redis::Value = cmd.query_async(&mut connection).await?;
+        parse_search_result(value)
+    }
+
+    /// Executes a [`HybridQuery`] asynchronously via `FT.HYBRID` and returns
+    /// processed documents.
+    pub async fn hybrid_query(&self, query: &crate::query::HybridQuery<'_>) -> Result<QueryOutput> {
+        let results = self.hybrid_search(query).await?;
+        let mut documents = Vec::with_capacity(results.docs.len());
+        for document in results.docs {
+            let mut map = document.into_map();
+            map.remove("payload");
+            documents.push(map);
+        }
+        Ok(QueryOutput::Documents(documents))
     }
 }
 
@@ -1695,6 +1767,57 @@ mod tests {
         assert_eq!(compose_key("routes:", ":", "ref1"), "routes:ref1");
         assert_eq!(compose_key("data", "::", "id"), "data::id");
         assert_eq!(compose_key("data::", "::", "id"), "data::id");
+    }
+
+    #[test]
+    fn search_index_multi_prefix_should_expose_all_prefixes_like_python_multi_prefix_tests() {
+        let index = SearchIndex::from_json_value(
+            serde_json::json!({
+                "index": {
+                    "name": "multi_pfx",
+                    "prefix": ["pfx_a", "pfx_b"]
+                },
+                "fields": [
+                    { "name": "test", "type": "tag" }
+                ]
+            }),
+            "redis://127.0.0.1:6379",
+        )
+        .expect("index should parse");
+
+        assert_eq!(index.prefix(), "pfx_a");
+        assert_eq!(index.prefixes(), vec!["pfx_a", "pfx_b"]);
+        assert_eq!(index.key("doc1"), "pfx_a:doc1");
+    }
+
+    #[test]
+    fn compose_key_should_handle_special_separators_like_python_key_separator_tests() {
+        for sep in &["_", "::", "->", ".", "/"] {
+            let result = compose_key("data", sep, "id");
+            assert_eq!(result, format!("data{sep}id"));
+        }
+    }
+
+    /// Tests from Python test_trailing_separator_normalization
+    #[test]
+    fn trailing_separator_normalization_like_python_key_separator_tests() {
+        let cases = [
+            ("user:", ":", "123", "user:123"),
+            ("user::", ":", "456", "user:456"),
+            ("user", ":", "789", "user:789"),
+            ("user-", "-", "abc", "user-abc"),
+        ];
+        for (prefix, sep, id, expected) in &cases {
+            let result = compose_key(prefix, sep, id);
+            assert_eq!(result, *expected, "prefix={prefix:?} sep={sep:?} id={id:?}");
+        }
+    }
+
+    /// Tests from Python test_empty_prefix_handled_correctly
+    #[test]
+    fn empty_prefix_compose_key_like_python_key_separator_tests() {
+        let result = compose_key("", ":", "789");
+        assert_eq!(result, "789");
     }
 
     #[test]

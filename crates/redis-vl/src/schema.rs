@@ -6,6 +6,97 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 
+/// A prefix specification that accepts either a single string or a list of
+/// strings for multi-prefix support.
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum Prefix {
+    /// A single key prefix.
+    Single(String),
+    /// Multiple key prefixes for multi-prefix indexes.
+    Multi(Vec<String>),
+}
+
+impl<'de> Deserialize<'de> for Prefix {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de;
+
+        struct PrefixVisitor;
+
+        impl<'de> de::Visitor<'de> for PrefixVisitor {
+            type Value = Prefix;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a string or a list of strings")
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> std::result::Result<Prefix, E> {
+                Ok(Prefix::Single(v.to_owned()))
+            }
+
+            fn visit_string<E: de::Error>(self, v: String) -> std::result::Result<Prefix, E> {
+                Ok(Prefix::Single(v))
+            }
+
+            fn visit_seq<A: de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> std::result::Result<Prefix, A::Error> {
+                let mut items = Vec::new();
+                while let Some(item) = seq.next_element::<String>()? {
+                    items.push(item);
+                }
+                Ok(Prefix::Multi(items))
+            }
+        }
+
+        deserializer.deserialize_any(PrefixVisitor)
+    }
+}
+
+impl Default for Prefix {
+    fn default() -> Self {
+        Prefix::Single("rvl".to_owned())
+    }
+}
+
+impl Prefix {
+    /// Returns the first (or only) prefix string.
+    pub fn first(&self) -> &str {
+        match self {
+            Prefix::Single(s) => s,
+            Prefix::Multi(v) => v.first().map(String::as_str).unwrap_or(""),
+        }
+    }
+
+    /// Returns all prefixes as a slice-like view.
+    pub fn all(&self) -> Vec<&str> {
+        match self {
+            Prefix::Single(s) => vec![s.as_str()],
+            Prefix::Multi(v) => v.iter().map(String::as_str).collect(),
+        }
+    }
+
+    /// Returns the number of prefixes.
+    pub fn len(&self) -> usize {
+        match self {
+            Prefix::Single(_) => 1,
+            Prefix::Multi(v) => v.len(),
+        }
+    }
+
+    /// Returns `true` if no prefixes are configured.
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Prefix::Single(s) => s.is_empty(),
+            Prefix::Multi(v) => v.is_empty(),
+        }
+    }
+}
+
 /// Complete RedisVL index schema.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexSchema {
@@ -107,9 +198,12 @@ impl IndexSchema {
 pub struct IndexDefinition {
     /// Redis Search index name.
     pub name: String,
-    /// Key prefix used when loading documents.
-    #[serde(default = "default_prefix")]
-    pub prefix: String,
+    /// Key prefix(es) used when loading documents.
+    ///
+    /// Accepts either a single string or a list of strings for multi-prefix
+    /// support.
+    #[serde(default)]
+    pub prefix: Prefix,
     /// Separator used between prefix and identifier.
     #[serde(default = "default_key_separator")]
     pub key_separator: String,
@@ -138,10 +232,6 @@ impl StorageType {
             Self::Json => "JSON",
         }
     }
-}
-
-fn default_prefix() -> String {
-    "rvl".to_owned()
 }
 
 fn default_key_separator() -> String {
@@ -516,7 +606,7 @@ impl VectorFieldAttributes {
 
 #[cfg(test)]
 mod tests {
-    use super::{IndexSchema, StorageType};
+    use super::{IndexSchema, Prefix, StorageType};
 
     #[test]
     fn schema_from_yaml_should_parse_json_storage() {
@@ -553,9 +643,61 @@ fields:
         }))
         .expect("schema should parse");
 
-        assert_eq!(schema.index.prefix, "rvl");
+        assert_eq!(schema.index.prefix.first(), "rvl");
         assert_eq!(schema.index.key_separator, ":");
         assert!(matches!(schema.index.storage_type, StorageType::Hash));
         assert!(schema.fields.is_empty());
+    }
+
+    #[test]
+    fn schema_should_accept_multi_prefix_list_like_python_multi_prefix_tests() {
+        let schema = IndexSchema::from_json_value(serde_json::json!({
+            "index": {
+                "name": "test",
+                "prefix": ["pfx_a", "pfx_b"]
+            }
+        }))
+        .expect("schema should parse");
+
+        assert_eq!(schema.index.prefix.len(), 2);
+        assert_eq!(schema.index.prefix.first(), "pfx_a");
+        assert_eq!(schema.index.prefix.all(), vec!["pfx_a", "pfx_b"]);
+        assert!(matches!(schema.index.prefix, Prefix::Multi(_)));
+    }
+
+    #[test]
+    fn schema_should_accept_single_string_prefix_like_python_tests() {
+        let schema = IndexSchema::from_json_value(serde_json::json!({
+            "index": {
+                "name": "test",
+                "prefix": "my_prefix"
+            }
+        }))
+        .expect("schema should parse");
+
+        assert_eq!(schema.index.prefix.first(), "my_prefix");
+        assert_eq!(schema.index.prefix.len(), 1);
+        assert_eq!(schema.index.prefix.all(), vec!["my_prefix"]);
+        assert!(matches!(schema.index.prefix, Prefix::Single(_)));
+    }
+
+    #[test]
+    fn schema_multi_prefix_yaml_should_parse() {
+        let schema = IndexSchema::from_yaml_str(
+            r#"
+index:
+  name: multi
+  prefix:
+    - alpha
+    - beta
+fields:
+  - name: tag
+    type: tag
+"#,
+        )
+        .expect("schema should parse");
+
+        assert_eq!(schema.index.prefix.len(), 2);
+        assert_eq!(schema.index.prefix.all(), vec!["alpha", "beta"]);
     }
 }
