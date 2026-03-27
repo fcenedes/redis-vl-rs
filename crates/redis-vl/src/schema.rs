@@ -173,6 +173,7 @@ impl IndexSchema {
                         field.name
                     )));
                 }
+                attrs.validate_svs()?;
             }
         }
 
@@ -182,6 +183,57 @@ impl IndexSchema {
     /// Returns the field with the supplied name.
     pub fn field(&self, name: &str) -> Option<&Field> {
         self.fields.iter().find(|field| field.name == name)
+    }
+
+    /// Adds a single field to the schema.
+    ///
+    /// Returns an error if a field with the same name already exists or if
+    /// validation fails.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::SchemaValidation`] when the name is empty, duplicated,
+    /// or a vector field has `dims == 0`.
+    pub fn add_field(&mut self, field: Field) -> Result<()> {
+        if self.fields.iter().any(|f| f.name == field.name) {
+            return Err(Error::SchemaValidation(format!(
+                "duplicate field name '{}'",
+                field.name
+            )));
+        }
+        if field.name.trim().is_empty() {
+            return Err(Error::SchemaValidation(
+                "field names cannot be empty".to_owned(),
+            ));
+        }
+        if let FieldKind::Vector { attrs } = &field.kind {
+            if attrs.dims == 0 {
+                return Err(Error::SchemaValidation(format!(
+                    "vector field '{}' must use dims > 0",
+                    field.name
+                )));
+            }
+        }
+        self.fields.push(field);
+        Ok(())
+    }
+
+    /// Adds multiple fields to the schema.
+    ///
+    /// This is a convenience wrapper around [`add_field`](Self::add_field) that
+    /// stops at the first error.
+    pub fn add_fields(&mut self, fields: Vec<Field>) -> Result<()> {
+        for field in fields {
+            self.add_field(field)?;
+        }
+        Ok(())
+    }
+
+    /// Removes a field by name, returning `true` if it was present.
+    pub fn remove_field(&mut self, name: &str) -> bool {
+        let before = self.fields.len();
+        self.fields.retain(|f| f.name != name);
+        self.fields.len() != before
     }
 
     /// Serializes the schema into `FT.CREATE` arguments after `SCHEMA`.
@@ -553,13 +605,22 @@ impl TimestampFieldAttributes {
 }
 
 /// Supported Redis vector index algorithms.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-#[serde(rename_all = "UPPERCASE")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VectorAlgorithm {
     /// Brute-force vector search.
+    #[serde(alias = "flat", alias = "FLAT")]
     Flat,
     /// Approximate nearest-neighbor HNSW search.
+    #[serde(alias = "hnsw", alias = "HNSW")]
     Hnsw,
+    /// SVS-VAMANA graph-based approximate search (Redis 8.2+).
+    #[serde(
+        alias = "svs-vamana",
+        alias = "SVS-VAMANA",
+        alias = "svs_vamana",
+        alias = "SVS_VAMANA"
+    )]
+    SvsVamana,
 }
 
 impl VectorAlgorithm {
@@ -567,7 +628,48 @@ impl VectorAlgorithm {
         match self {
             Self::Flat => "FLAT",
             Self::Hnsw => "HNSW",
+            Self::SvsVamana => "SVS-VAMANA",
         }
+    }
+}
+
+/// Compression types for SVS-VAMANA vector fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SvsCompressionType {
+    /// 4-bit local vector quantization.
+    #[serde(alias = "lvq4", alias = "LVQ4")]
+    Lvq4,
+    /// 4×4-bit local vector quantization.
+    #[serde(alias = "lvq4x4", alias = "LVQ4x4")]
+    Lvq4x4,
+    /// 4×8-bit local vector quantization.
+    #[serde(alias = "lvq4x8", alias = "LVQ4x8")]
+    Lvq4x8,
+    /// 8-bit local vector quantization.
+    #[serde(alias = "lvq8", alias = "LVQ8")]
+    Lvq8,
+    /// LeanVec 4×8 compression.
+    #[serde(alias = "leanvec4x8", alias = "LeanVec4x8")]
+    LeanVec4x8,
+    /// LeanVec 8×8 compression.
+    #[serde(alias = "leanvec8x8", alias = "LeanVec8x8")]
+    LeanVec8x8,
+}
+
+impl SvsCompressionType {
+    fn redis_name(self) -> &'static str {
+        match self {
+            Self::Lvq4 => "LVQ4",
+            Self::Lvq4x4 => "LVQ4x4",
+            Self::Lvq4x8 => "LVQ4x8",
+            Self::Lvq8 => "LVQ8",
+            Self::LeanVec4x8 => "LeanVec4x8",
+            Self::LeanVec8x8 => "LeanVec8x8",
+        }
+    }
+
+    fn is_lean_vec(self) -> bool {
+        matches!(self, Self::LeanVec4x8 | Self::LeanVec8x8)
     }
 }
 
@@ -682,6 +784,19 @@ pub struct VectorFieldAttributes {
     pub ef_runtime: Option<usize>,
     /// Optional epsilon value.
     pub epsilon: Option<f32>,
+    // ── SVS-VAMANA specific ──
+    /// Maximum outgoing edges per node (SVS-VAMANA).
+    pub graph_max_degree: Option<usize>,
+    /// Build-time candidate window (SVS-VAMANA).
+    pub construction_window_size: Option<usize>,
+    /// Search-time candidate window (SVS-VAMANA).
+    pub search_window_size: Option<usize>,
+    /// Compression type for SVS-VAMANA.
+    pub compression: Option<SvsCompressionType>,
+    /// Dimensionality reduction target for LeanVec compression (SVS-VAMANA).
+    pub reduce: Option<usize>,
+    /// Minimum vectors before compression training (SVS-VAMANA).
+    pub training_threshold: Option<usize>,
 }
 
 impl VectorFieldAttributes {
@@ -699,10 +814,12 @@ impl VectorFieldAttributes {
             args.push("INITIAL_CAP".to_owned());
             args.push(initial_cap.to_string());
         }
+        // FLAT-specific
         if let Some(block_size) = self.block_size {
             args.push("BLOCK_SIZE".to_owned());
             args.push(block_size.to_string());
         }
+        // HNSW-specific
         if let Some(m) = self.m {
             args.push("M".to_owned());
             args.push(m.to_string());
@@ -719,8 +836,78 @@ impl VectorFieldAttributes {
             args.push("EPSILON".to_owned());
             args.push(epsilon.to_string());
         }
+        // SVS-VAMANA specific
+        if let Some(graph_max_degree) = self.graph_max_degree {
+            args.push("GRAPH_MAX_DEGREE".to_owned());
+            args.push(graph_max_degree.to_string());
+        }
+        if let Some(construction_window_size) = self.construction_window_size {
+            args.push("CONSTRUCTION_WINDOW_SIZE".to_owned());
+            args.push(construction_window_size.to_string());
+        }
+        if let Some(search_window_size) = self.search_window_size {
+            args.push("SEARCH_WINDOW_SIZE".to_owned());
+            args.push(search_window_size.to_string());
+        }
+        if let Some(compression) = self.compression {
+            args.push("COMPRESSION".to_owned());
+            args.push(compression.redis_name().to_owned());
+        }
+        if let Some(reduce) = self.reduce {
+            args.push("REDUCE".to_owned());
+            args.push(reduce.to_string());
+        }
+        if let Some(training_threshold) = self.training_threshold {
+            args.push("TRAINING_THRESHOLD".to_owned());
+            args.push(training_threshold.to_string());
+        }
 
         args
+    }
+
+    /// Validates SVS-VAMANA specific constraints.
+    ///
+    /// Call after construction when `algorithm == SvsVamana` to ensure the
+    /// data-type restriction (only Float16/Float32) and LeanVec `reduce`
+    /// constraints are met.
+    pub fn validate_svs(&self) -> Result<()> {
+        if self.algorithm != VectorAlgorithm::SvsVamana {
+            return Ok(());
+        }
+        // SVS-VAMANA only supports Float16 and Float32
+        if !matches!(
+            self.datatype,
+            VectorDataType::Float16 | VectorDataType::Float32
+        ) {
+            return Err(Error::SchemaValidation(format!(
+                "SVS-VAMANA only supports FLOAT16 and FLOAT32 datatypes, got {}",
+                self.datatype
+            )));
+        }
+        // `reduce` requires a LeanVec compression type
+        if let Some(reduce) = self.reduce {
+            match self.compression {
+                None => {
+                    return Err(Error::SchemaValidation(
+                        "reduce parameter requires compression to be set".to_owned(),
+                    ));
+                }
+                Some(c) if !c.is_lean_vec() => {
+                    return Err(Error::SchemaValidation(format!(
+                        "reduce parameter is only supported with LeanVec compression types, got {:?}",
+                        c
+                    )));
+                }
+                _ => {}
+            }
+            if reduce >= self.dims {
+                return Err(Error::SchemaValidation(format!(
+                    "reduce ({reduce}) must be less than dims ({})",
+                    self.dims
+                )));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -882,5 +1069,358 @@ fields:
         let args = schema.fields[0].redis_args(StorageType::Hash);
         assert!(!args.contains(&"INDEXMISSING".to_owned()));
         assert!(!args.contains(&"INDEXEMPTY".to_owned()));
+    }
+
+    #[test]
+    fn vector_data_type_from_str_roundtrip() {
+        use super::VectorDataType;
+        use std::str::FromStr;
+
+        for (input, expected) in [
+            ("bfloat16", VectorDataType::Bfloat16),
+            ("float16", VectorDataType::Float16),
+            ("float32", VectorDataType::Float32),
+            ("float64", VectorDataType::Float64),
+            ("BFLOAT16", VectorDataType::Bfloat16),
+            ("FLOAT16", VectorDataType::Float16),
+            ("FLOAT32", VectorDataType::Float32),
+            ("FLOAT64", VectorDataType::Float64),
+            ("Float32", VectorDataType::Float32),
+        ] {
+            let parsed = VectorDataType::from_str(input)
+                .unwrap_or_else(|_| panic!("should parse '{input}'"));
+            assert_eq!(parsed, expected, "mismatch for input '{input}'");
+        }
+
+        assert!(VectorDataType::from_str("int8").is_err());
+        assert!(VectorDataType::from_str("").is_err());
+    }
+
+    #[test]
+    fn vector_data_type_as_str_and_display() {
+        use super::VectorDataType;
+
+        assert_eq!(VectorDataType::Bfloat16.as_str(), "bfloat16");
+        assert_eq!(VectorDataType::Float16.as_str(), "float16");
+        assert_eq!(VectorDataType::Float32.as_str(), "float32");
+        assert_eq!(VectorDataType::Float64.as_str(), "float64");
+
+        assert_eq!(VectorDataType::Float32.to_string(), "float32");
+        assert_eq!(VectorDataType::Bfloat16.to_string(), "bfloat16");
+    }
+
+    #[test]
+    fn vector_data_type_default_is_float32() {
+        use super::VectorDataType;
+        assert_eq!(VectorDataType::default(), VectorDataType::Float32);
+    }
+
+    #[test]
+    fn vector_data_type_serde_uppercase() {
+        use super::VectorDataType;
+
+        let json = serde_json::to_string(&VectorDataType::Bfloat16).unwrap();
+        assert_eq!(json, "\"BFLOAT16\"");
+
+        let json = serde_json::to_string(&VectorDataType::Float16).unwrap();
+        assert_eq!(json, "\"FLOAT16\"");
+
+        let deserialized: VectorDataType = serde_json::from_str("\"FLOAT64\"").unwrap();
+        assert_eq!(deserialized, VectorDataType::Float64);
+    }
+
+    #[test]
+    fn schema_from_yaml_bfloat16_vector() {
+        use super::{FieldKind, VectorDataType};
+        let schema = IndexSchema::from_yaml_str(
+            r#"
+index:
+  name: bf16test
+  prefix: bf16
+fields:
+  - name: vec
+    type: vector
+    attrs:
+      algorithm: FLAT
+      dims: 4
+      datatype: BFLOAT16
+      distance_metric: COSINE
+"#,
+        )
+        .expect("schema with BFLOAT16 should parse");
+
+        assert_eq!(schema.index.name, "bf16test");
+        let vec_field = &schema.fields[0];
+        if let FieldKind::Vector { ref attrs } = vec_field.kind {
+            assert_eq!(attrs.datatype, VectorDataType::Bfloat16);
+        } else {
+            panic!("expected vector field");
+        }
+    }
+
+    #[test]
+    fn schema_from_yaml_float16_vector() {
+        use super::{FieldKind, VectorDataType};
+        let schema = IndexSchema::from_yaml_str(
+            r#"
+index:
+  name: f16test
+  prefix: f16
+fields:
+  - name: vec
+    type: vector
+    attrs:
+      algorithm: HNSW
+      dims: 8
+      datatype: FLOAT16
+      distance_metric: L2
+"#,
+        )
+        .expect("schema with FLOAT16 should parse");
+
+        let vec_field = &schema.fields[0];
+        if let FieldKind::Vector { ref attrs } = vec_field.kind {
+            assert_eq!(attrs.datatype, VectorDataType::Float16);
+        } else {
+            panic!("expected vector field");
+        }
+    }
+
+    // ── add_field / remove_field parity tests (upstream: test_schema.py) ──
+
+    #[test]
+    fn add_field_should_append_and_validate() {
+        use super::{Field, FieldKind, TagFieldAttributes};
+
+        let mut schema = IndexSchema::from_json_value(serde_json::json!({
+            "index": { "name": "test" },
+            "fields": [
+                { "name": "title", "type": "text" }
+            ]
+        }))
+        .expect("schema should parse");
+
+        assert_eq!(schema.fields.len(), 1);
+
+        let field = Field {
+            name: "brand".to_owned(),
+            path: None,
+            kind: FieldKind::Tag {
+                attrs: TagFieldAttributes::default(),
+            },
+        };
+        schema.add_field(field).expect("add_field should succeed");
+        assert_eq!(schema.fields.len(), 2);
+        assert!(schema.field("brand").is_some());
+    }
+
+    #[test]
+    fn add_field_duplicate_should_error() {
+        let mut schema = IndexSchema::from_json_value(serde_json::json!({
+            "index": { "name": "test" },
+            "fields": [
+                { "name": "title", "type": "text" }
+            ]
+        }))
+        .expect("schema should parse");
+
+        let field = super::Field {
+            name: "title".to_owned(),
+            path: None,
+            kind: super::FieldKind::Text {
+                attrs: super::TextFieldAttributes::default(),
+            },
+        };
+        assert!(schema.add_field(field).is_err());
+    }
+
+    #[test]
+    fn remove_field_should_drop_by_name() {
+        let mut schema = IndexSchema::from_json_value(serde_json::json!({
+            "index": { "name": "test" },
+            "fields": [
+                { "name": "title", "type": "text" },
+                { "name": "brand", "type": "tag" }
+            ]
+        }))
+        .expect("schema should parse");
+
+        assert_eq!(schema.fields.len(), 2);
+        assert!(schema.remove_field("title"));
+        assert_eq!(schema.fields.len(), 1);
+        assert!(schema.field("title").is_none());
+        // removing again returns false
+        assert!(!schema.remove_field("title"));
+    }
+
+    // ── SVS-VAMANA parity tests (upstream: test_validation.py) ──
+
+    #[test]
+    fn svs_vamana_schema_with_float32_should_parse() {
+        use super::{FieldKind, VectorAlgorithm};
+
+        let schema = IndexSchema::from_json_value(serde_json::json!({
+            "index": { "name": "test-svs-index" },
+            "fields": [{
+                "name": "vec",
+                "type": "vector",
+                "attrs": {
+                    "algorithm": "SvsVamana",
+                    "dims": 128,
+                    "distance_metric": "COSINE",
+                    "datatype": "FLOAT32"
+                }
+            }]
+        }))
+        .expect("SVS-VAMANA with float32 should parse");
+
+        if let FieldKind::Vector { ref attrs } = schema.fields[0].kind {
+            assert_eq!(attrs.algorithm, VectorAlgorithm::SvsVamana);
+        } else {
+            panic!("expected vector field");
+        }
+    }
+
+    #[test]
+    fn svs_vamana_with_float64_should_fail_validation() {
+        let result = IndexSchema::from_json_value(serde_json::json!({
+            "index": { "name": "test-svs-index" },
+            "fields": [{
+                "name": "vec",
+                "type": "vector",
+                "attrs": {
+                    "algorithm": "SvsVamana",
+                    "dims": 128,
+                    "distance_metric": "COSINE",
+                    "datatype": "FLOAT64"
+                }
+            }]
+        }));
+        assert!(result.is_err(), "SVS-VAMANA should reject FLOAT64");
+    }
+
+    #[test]
+    fn svs_vamana_with_compression_and_reduce() {
+        use super::{FieldKind, SvsCompressionType};
+
+        let schema = IndexSchema::from_json_value(serde_json::json!({
+            "index": { "name": "test-svs-index" },
+            "fields": [{
+                "name": "vec",
+                "type": "vector",
+                "attrs": {
+                    "algorithm": "SvsVamana",
+                    "dims": 128,
+                    "distance_metric": "COSINE",
+                    "datatype": "FLOAT32",
+                    "compression": "LeanVec4x8",
+                    "reduce": 64
+                }
+            }]
+        }))
+        .expect("SVS-VAMANA with LeanVec + reduce should parse");
+
+        if let FieldKind::Vector { ref attrs } = schema.fields[0].kind {
+            assert_eq!(attrs.compression, Some(SvsCompressionType::LeanVec4x8));
+            assert_eq!(attrs.reduce, Some(64));
+        } else {
+            panic!("expected vector field");
+        }
+    }
+
+    #[test]
+    fn svs_vamana_reduce_without_compression_should_fail() {
+        let result = IndexSchema::from_json_value(serde_json::json!({
+            "index": { "name": "test-svs-index" },
+            "fields": [{
+                "name": "vec",
+                "type": "vector",
+                "attrs": {
+                    "algorithm": "SvsVamana",
+                    "dims": 128,
+                    "distance_metric": "COSINE",
+                    "datatype": "FLOAT32",
+                    "reduce": 64
+                }
+            }]
+        }));
+        assert!(
+            result.is_err(),
+            "SVS-VAMANA reduce without compression should fail"
+        );
+    }
+
+    #[test]
+    fn svs_vamana_reduce_with_lvq4_should_fail() {
+        let result = IndexSchema::from_json_value(serde_json::json!({
+            "index": { "name": "test-svs-index" },
+            "fields": [{
+                "name": "vec",
+                "type": "vector",
+                "attrs": {
+                    "algorithm": "SvsVamana",
+                    "dims": 128,
+                    "distance_metric": "COSINE",
+                    "datatype": "FLOAT32",
+                    "compression": "Lvq4",
+                    "reduce": 64
+                }
+            }]
+        }));
+        assert!(result.is_err(), "SVS-VAMANA reduce with LVQ4 should fail");
+    }
+
+    #[test]
+    fn svs_vamana_reduce_gte_dims_should_fail() {
+        let result = IndexSchema::from_json_value(serde_json::json!({
+            "index": { "name": "test-svs-index" },
+            "fields": [{
+                "name": "vec",
+                "type": "vector",
+                "attrs": {
+                    "algorithm": "SvsVamana",
+                    "dims": 128,
+                    "distance_metric": "COSINE",
+                    "datatype": "FLOAT32",
+                    "compression": "LeanVec4x8",
+                    "reduce": 128
+                }
+            }]
+        }));
+        assert!(result.is_err(), "SVS-VAMANA reduce >= dims should fail");
+    }
+
+    #[test]
+    fn svs_vamana_redis_args_include_svs_params() {
+        let schema = IndexSchema::from_json_value(serde_json::json!({
+            "index": { "name": "test-svs-index" },
+            "fields": [{
+                "name": "vec",
+                "type": "vector",
+                "attrs": {
+                    "algorithm": "SvsVamana",
+                    "dims": 128,
+                    "distance_metric": "COSINE",
+                    "datatype": "FLOAT32",
+                    "graph_max_degree": 40,
+                    "construction_window_size": 250,
+                    "search_window_size": 20,
+                    "compression": "Lvq8",
+                    "training_threshold": 10000
+                }
+            }]
+        }))
+        .expect("SVS schema should parse");
+
+        let args = schema.fields[0].redis_args(StorageType::Hash);
+        assert!(args.contains(&"VECTOR".to_owned()));
+        assert!(args.contains(&"SVS-VAMANA".to_owned()));
+        assert!(args.contains(&"GRAPH_MAX_DEGREE".to_owned()));
+        assert!(args.contains(&"40".to_owned()));
+        assert!(args.contains(&"CONSTRUCTION_WINDOW_SIZE".to_owned()));
+        assert!(args.contains(&"SEARCH_WINDOW_SIZE".to_owned()));
+        assert!(args.contains(&"COMPRESSION".to_owned()));
+        assert!(args.contains(&"LVQ8".to_owned()));
+        assert!(args.contains(&"TRAINING_THRESHOLD".to_owned()));
     }
 }

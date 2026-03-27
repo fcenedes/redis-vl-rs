@@ -45,8 +45,9 @@ pub use rerankers::{AsyncReranker, RerankDoc, RerankResult, Reranker};
 pub use rerankers::{CohereReranker, CohereRerankerConfig};
 pub use schema::{
     Field, FieldKind, GeoFieldAttributes, IndexDefinition, IndexSchema, NumericFieldAttributes,
-    Prefix, StorageType, TagFieldAttributes, TextFieldAttributes, TimestampFieldAttributes,
-    VectorAlgorithm, VectorDataType, VectorDistanceMetric, VectorFieldAttributes,
+    Prefix, StorageType, SvsCompressionType, TagFieldAttributes, TextFieldAttributes,
+    TimestampFieldAttributes, VectorAlgorithm, VectorDataType, VectorDistanceMetric,
+    VectorFieldAttributes,
 };
 pub use vectorizers::{
     AsyncVectorizer, CustomTextVectorizer, EmbeddingRequest, LiteLLMTextVectorizer,

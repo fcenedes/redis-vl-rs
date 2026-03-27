@@ -885,6 +885,8 @@ pub struct TextQuery {
     filter_expression: Option<FilterExpression>,
     return_score: bool,
     options: QueryOptions,
+    stopwords: Option<std::collections::HashSet<String>>,
+    text_weights: Option<std::collections::HashMap<String, f32>>,
 }
 
 impl TextQuery {
@@ -896,6 +898,8 @@ impl TextQuery {
             filter_expression: None,
             return_score: true,
             options: QueryOptions::with_num_results(10),
+            stopwords: None,
+            text_weights: None,
         }
     }
 
@@ -964,13 +968,78 @@ impl TextQuery {
         self.options.scorer = Some(scorer.into());
         self
     }
+
+    /// Sets stopwords to filter from the query text.
+    ///
+    /// Words in the set are removed (case-insensitive) from the query before
+    /// it is sent to Redis. This mirrors the Python `stopwords` parameter.
+    pub fn with_stopwords(mut self, stopwords: std::collections::HashSet<String>) -> Self {
+        self.stopwords = Some(stopwords);
+        self
+    }
+
+    /// Sets word weights for the text search.
+    ///
+    /// Weighted words appear in the Redis query as `word=>{weight}` syntax,
+    /// mirroring the Python `text_weights` parameter.
+    pub fn with_text_weights(mut self, weights: std::collections::HashMap<String, f32>) -> Self {
+        self.text_weights = Some(weights);
+        self
+    }
+
+    /// Updates text weights after construction (mirrors Python `set_text_weights`).
+    pub fn set_text_weights(&mut self, weights: std::collections::HashMap<String, f32>) {
+        self.text_weights = Some(weights);
+    }
+
+    /// Returns the current text weights, if any.
+    pub fn text_weights(&self) -> Option<&std::collections::HashMap<String, f32>> {
+        self.text_weights.as_ref()
+    }
+
+    /// Builds the query text, applying stopword removal and word weights.
+    fn build_query_text(&self) -> String {
+        let mut text = self.text.clone();
+
+        // Apply stopwords
+        if let Some(stopwords) = &self.stopwords {
+            if !stopwords.is_empty() {
+                let words: Vec<&str> = text.split_whitespace().collect();
+                let filtered: Vec<&str> = words
+                    .into_iter()
+                    .filter(|w| !stopwords.contains(&w.to_lowercase()))
+                    .collect();
+                text = filtered.join(" ");
+            }
+        }
+
+        // Apply word weights
+        if let Some(weights) = &self.text_weights {
+            if !weights.is_empty() {
+                let words: Vec<String> = text
+                    .split_whitespace()
+                    .map(|w| {
+                        if let Some(weight) = weights.get(w) {
+                            format!("{}=>{{{}}}", w, weight)
+                        } else {
+                            w.to_owned()
+                        }
+                    })
+                    .collect();
+                text = words.join(" ");
+            }
+        }
+
+        text
+    }
 }
 
 impl QueryString for TextQuery {
     fn to_redis_query(&self) -> String {
+        let processed_text = self.build_query_text();
         let text_part = match &self.text_field_name {
-            Some(field) => format!("@{}:({})", field, self.text),
-            None => self.text.clone(),
+            Some(field) => format!("@{}:({})", field, processed_text),
+            None => processed_text,
         };
         match &self.filter_expression {
             Some(filter) => {
@@ -3203,5 +3272,100 @@ mod tests {
 
         let qs = query.to_redis_query();
         assert!(qs.contains("AND @category:{sports}"));
+    }
+
+    // ── TextQuery stopwords/text_weights parity tests (upstream: test_query_types.py) ──
+
+    #[test]
+    fn text_query_with_stopwords_removes_words() {
+        use std::collections::HashSet;
+        let mut stopwords = HashSet::new();
+        stopwords.insert("the".to_owned());
+        stopwords.insert("a".to_owned());
+
+        let query = TextQuery::new("a doctor in the house")
+            .for_field("description")
+            .with_stopwords(stopwords);
+
+        let qs = query.to_redis_query();
+        // "a" and "the" should be removed
+        assert!(!qs.contains(" a "));
+        assert!(!qs.contains(" the "));
+        assert!(qs.contains("doctor"));
+        assert!(qs.contains("house"));
+    }
+
+    #[test]
+    fn text_query_with_text_weights_applies_weight_syntax() {
+        use std::collections::HashMap;
+        let mut weights = HashMap::new();
+        weights.insert("doctor".to_owned(), 2.0_f32);
+
+        let query = TextQuery::new("a doctor in the house")
+            .for_field("description")
+            .with_text_weights(weights);
+
+        let qs = query.to_redis_query();
+        assert!(qs.contains("doctor=>{2}"));
+        // Non-weighted words should appear normally
+        assert!(qs.contains("house"));
+    }
+
+    #[test]
+    fn text_query_with_stopwords_and_weights_combined() {
+        use std::collections::{HashMap, HashSet};
+        let mut stopwords = HashSet::new();
+        stopwords.insert("the".to_owned());
+        stopwords.insert("a".to_owned());
+
+        let mut weights = HashMap::new();
+        weights.insert("doctor".to_owned(), 2.0_f32);
+
+        let query = TextQuery::new("a doctor in the house")
+            .for_field("description")
+            .with_stopwords(stopwords)
+            .with_text_weights(weights);
+
+        let qs = query.to_redis_query();
+        // Stopwords removed + weight applied
+        assert!(!qs.contains(" a "));
+        assert!(!qs.contains(" the "));
+        assert!(qs.contains("doctor=>{2}"));
+    }
+
+    #[test]
+    fn text_query_set_text_weights_mirrors_builder() {
+        use std::collections::HashMap;
+        let mut weights = HashMap::new();
+        weights.insert("medical".to_owned(), 5.0_f32);
+
+        let query1 = TextQuery::new("a medical professional")
+            .for_field("description")
+            .with_text_weights(weights.clone());
+
+        let mut query2 = TextQuery::new("a medical professional").for_field("description");
+        query2.set_text_weights(weights);
+
+        assert_eq!(query1.to_redis_query(), query2.to_redis_query());
+    }
+
+    #[test]
+    fn text_query_text_weights_accessor() {
+        use std::collections::HashMap;
+        let mut weights = HashMap::new();
+        weights.insert("alpha".to_owned(), 0.2_f32);
+        weights.insert("bravo".to_owned(), 0.4_f32);
+
+        let query = TextQuery::new("sample text query")
+            .for_field("description")
+            .with_text_weights(weights.clone());
+
+        assert_eq!(query.text_weights(), Some(&weights));
+    }
+
+    #[test]
+    fn text_query_no_weights_returns_none() {
+        let query = TextQuery::new("sample text query").for_field("description");
+        assert!(query.text_weights().is_none());
     }
 }
