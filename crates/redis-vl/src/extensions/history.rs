@@ -418,7 +418,7 @@ pub struct SemanticMessageHistory {
 impl SemanticMessageHistory {
     /// Creates a new semantic message history backed by a hash-based Redis Search index.
     ///
-    /// If `overwrite` is needed, use [`new_with_options`] instead.
+    /// If `overwrite` is needed, use [`Self::new_with_options`] instead.
     pub fn new<V>(
         name: impl Into<String>,
         redis_url: impl Into<String>,

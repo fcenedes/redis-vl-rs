@@ -726,7 +726,7 @@ impl SearchIndex {
         Ok(batches)
     }
 
-    /// Executes a [`HybridQuery`] via `FT.HYBRID` and returns parsed search
+    /// Executes a [`crate::query::HybridQuery`] via `FT.HYBRID` and returns parsed search
     /// results.
     ///
     /// Requires Redis 8.4.0+ with the hybrid search capability.
@@ -738,7 +738,7 @@ impl SearchIndex {
         parse_search_result(value)
     }
 
-    /// Executes a [`HybridQuery`] via `FT.HYBRID` and returns processed
+    /// Executes a [`crate::query::HybridQuery`] via `FT.HYBRID` and returns processed
     /// documents.
     pub fn hybrid_query(&self, query: &crate::query::HybridQuery<'_>) -> Result<QueryOutput> {
         let results = self.hybrid_search(query)?;
@@ -751,7 +751,7 @@ impl SearchIndex {
         Ok(QueryOutput::Documents(documents))
     }
 
-    /// Executes an [`AggregateHybridQuery`] via `FT.AGGREGATE` and returns
+    /// Executes an [`crate::query::AggregateHybridQuery`] via `FT.AGGREGATE` and returns
     /// processed documents.
     ///
     /// Mirrors the Python `_aggregate()` code path.
@@ -767,7 +767,7 @@ impl SearchIndex {
         Ok(QueryOutput::Documents(documents))
     }
 
-    /// Executes a [`MultiVectorQuery`] via `FT.AGGREGATE` and returns
+    /// Executes a [`crate::query::MultiVectorQuery`] via `FT.AGGREGATE` and returns
     /// processed documents.
     pub fn multi_vector_query(
         &self,
@@ -1466,7 +1466,7 @@ impl AsyncSearchIndex {
         Ok(value)
     }
 
-    /// Executes a [`HybridQuery`] asynchronously via `FT.HYBRID` and returns
+    /// Executes a [`crate::query::HybridQuery`] asynchronously via `FT.HYBRID` and returns
     /// parsed search results.
     ///
     /// Requires Redis 8.4.0+ with the hybrid search capability.
@@ -1481,7 +1481,7 @@ impl AsyncSearchIndex {
         parse_search_result(value)
     }
 
-    /// Executes a [`HybridQuery`] asynchronously via `FT.HYBRID` and returns
+    /// Executes a [`crate::query::HybridQuery`] asynchronously via `FT.HYBRID` and returns
     /// processed documents.
     pub async fn hybrid_query(&self, query: &crate::query::HybridQuery<'_>) -> Result<QueryOutput> {
         let results = self.hybrid_search(query).await?;
@@ -1494,7 +1494,7 @@ impl AsyncSearchIndex {
         Ok(QueryOutput::Documents(documents))
     }
 
-    /// Executes an [`AggregateHybridQuery`] asynchronously via `FT.AGGREGATE`
+    /// Executes an [`crate::query::AggregateHybridQuery`] asynchronously via `FT.AGGREGATE`
     /// and returns processed documents.
     pub async fn aggregate_query(
         &self,
@@ -1508,7 +1508,7 @@ impl AsyncSearchIndex {
         Ok(QueryOutput::Documents(documents))
     }
 
-    /// Executes a [`MultiVectorQuery`] asynchronously via `FT.AGGREGATE` and
+    /// Executes a [`crate::query::MultiVectorQuery`] asynchronously via `FT.AGGREGATE` and
     /// returns processed documents.
     pub async fn multi_vector_query(
         &self,

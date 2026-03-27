@@ -622,7 +622,7 @@ impl SemanticRouter {
     ///
     /// The `vectorizer` field contains a `{"type": "custom"}` marker since
     /// Rust vectorizer implementations cannot be serialized.  Use this for
-    /// round-tripping via [`from_dict`].
+    /// round-tripping via [`Self::from_dict`].
     pub fn to_json_value(&self) -> Result<Value> {
         Ok(json!({
             "name": self.name,
@@ -634,7 +634,7 @@ impl SemanticRouter {
         }))
     }
 
-    /// Alias for [`to_json_value`] matching the Python `to_dict()` name.
+    /// Alias for [`Self::to_json_value`] matching the Python `to_dict()` name.
     pub fn to_dict(&self) -> Result<Value> {
         self.to_json_value()
     }
