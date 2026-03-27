@@ -15,11 +15,12 @@ for detailed coverage against the Python surface.
 
 | Module | Description |
 | --- | --- |
-| `schema` | YAML/JSON index schema parsing with typed field attributes |
-| `index` | Sync and async search index lifecycle |
+| `schema` | YAML/JSON index schema parsing with typed field attributes, multi-prefix support |
+| `index` | Sync and async search index lifecycle, hybrid search, aggregate queries, multi-vector queries |
 | `filter` | Composable filter DSL (Tag, Text, Num, Geo, Timestamp) |
-| `query` | Vector, range, text, filter, and count queries |
-| `vectorizers` | OpenAI, LiteLLM, and custom text vectorizers |
+| `query` | Vector, range, text, filter, count, hybrid, aggregate hybrid, multi-vector, and SQL queries |
+| `vectorizers` | OpenAI, LiteLLM, Custom, Azure OpenAI, Cohere, VoyageAI, and Mistral vectorizers |
+| `rerankers` | Reranker traits and Cohere reranker |
 | `extensions` | Embeddings cache, semantic cache, message history, semantic router |
 
 ## Prerequisites

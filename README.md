@@ -11,17 +11,24 @@ of [Redis](https://redis.io/).
 ## Features
 
 - **Schema** – define index schemas in YAML or JSON with typed field attributes
-  (Tag, Text, Numeric, Geo, Timestamp, Vector), stopwords, and Hash/JSON
-  storage selection.
+  (Tag, Text, Numeric, Geo, Timestamp, Vector), stopwords, multi-prefix support,
+  and Hash/JSON storage selection.
 - **Search Index** – sync and async index lifecycle: create, delete, load,
-  fetch, search, query, batch operations, and pagination.
+  fetch, search, query, batch operations, pagination, hybrid search, aggregate
+  queries, multi-vector queries, and `from_existing`.
 - **Filters** – composable filter DSL: `Tag`, `Text`, `Num`, `Geo`,
   `GeoRadius`, `Timestamp` with boolean composition.
 - **Queries** – `VectorQuery`, `VectorRangeQuery`, `TextQuery`, `FilterQuery`,
-  `CountQuery`. `HybridQuery` and `MultiVectorQuery` types exist but runtime
-  parity is still in progress.
-- **Vectorizers** – `OpenAITextVectorizer`, `LiteLLMTextVectorizer`, and
-  `CustomTextVectorizer` behind `openai` / `litellm` feature flags.
+  `CountQuery`, `HybridQuery` (generates `FT.HYBRID` for Redis 8.4+),
+  `AggregateHybridQuery` (generates `FT.AGGREGATE`), and `MultiVectorQuery`.
+- **SQL Queries** – `SQLQuery` behind the `sql` feature flag: translates SQL
+  `SELECT` statements to Redis Search queries with `WHERE`, `ORDER BY`,
+  `LIMIT`/`OFFSET`, and field projection.
+- **Vectorizers** – `OpenAITextVectorizer`, `LiteLLMTextVectorizer`,
+  `CustomTextVectorizer`, `AzureOpenAITextVectorizer`, `CohereTextVectorizer`,
+  `VoyageAITextVectorizer`, and `MistralAITextVectorizer`.
+- **Rerankers** – `CohereReranker` behind the `rerankers` feature flag with
+  sync and async support.
 - **Extensions** – `EmbeddingsCache`, `SemanticCache`, `MessageHistory`,
   `SemanticMessageHistory`, and `SemanticRouter`, all Redis-backed.
 - **CLI** (`rvl`) – `version`, `index create/delete/destroy/info/listall`, and
@@ -29,12 +36,10 @@ of [Redis](https://redis.io/).
 
 ### Not yet implemented
 
-- SQL queries (`SQLQuery`)
-- Rerankers
-- Additional vectorizer providers (Azure OpenAI, Cohere, Vertex AI, VoyageAI,
-  Mistral, Bedrock, HuggingFace local)
-- Full hybrid/aggregate query runtime parity
-- Multi-prefix index support
+- Aggregate SQL queries (`COUNT`, `GROUP BY`, vector/geo functions)
+- Additional vectorizer providers (Vertex AI, Bedrock, HuggingFace local)
+- Redis 8.4 end-to-end integration testing for hybrid/aggregate/multi-vector
+- Semantic extension parity (dtype, default vectorizers, from-existing)
 
 ## Quick start
 
@@ -110,15 +115,16 @@ Set `REDIS_URL` or pass `--redis-url` to override the default
 | --- | --- | --- |
 | `openai` | ✓ | OpenAI-compatible vectorizer |
 | `litellm` | ✓ | LiteLLM vectorizer (requires `openai`) |
-| `azure-openai` | | Azure OpenAI adapter (planned) |
-| `cohere` | | Cohere adapter (planned) |
+| `azure-openai` | | Azure OpenAI vectorizer |
+| `cohere` | | Cohere vectorizer |
+| `voyageai` | | VoyageAI vectorizer |
+| `mistral` | | Mistral vectorizer |
+| `sql` | | SQL query support (`SQLQuery`) |
+| `rerankers` | | Reranker support (`CohereReranker`) |
 | `vertex-ai` | | Vertex AI adapter (planned) |
-| `voyageai` | | VoyageAI adapter (planned) |
-| `mistral` | | Mistral adapter (planned) |
 | `bedrock` | | AWS Bedrock adapter (planned) |
 | `hf-local` | | HuggingFace local adapter (planned) |
-| `sql` | | SQL query support (planned) |
-| `rerankers` | | Reranker support (planned) |
+| `anthropic` | | Anthropic adapter (planned) |
 
 Flags marked *(planned)* are declared but not yet implemented.
 
@@ -139,4 +145,4 @@ REDISVL_RUN_INTEGRATION=1 cargo test --workspace
 
 ## License
 
-MIT – see [LICENSE](LICENSE) for details.
+MIT – see the LICENSE file for details.

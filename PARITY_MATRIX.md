@@ -8,16 +8,16 @@ source of truth for behavior parity.
 
 | Area | Target | Status | Notes |
 | --- | --- | --- | --- |
-| Schema | `IndexSchema`, YAML loading, typed field attrs | In progress | YAML/JSON parsing, field validation, stopwords, hash/json storage, and single-prefix key-separator normalization are implemented; multi-prefix and more advanced schema parity are still open |
+| Schema | `IndexSchema`, YAML loading, typed field attrs | In progress | YAML/JSON parsing, field validation, stopwords, hash/json storage, multi-prefix support, and key-separator normalization are implemented; some advanced schema edge cases remain |
 | Filters | Tag/Text/Num/Geo/GeoRadius/Timestamp | In progress | Core DSL and rendering are implemented with unit/integration coverage; broader integration parity is still pending |
-| Queries | Vector/Range/Text/Filter/Count/Hybrid/MultiVector | In progress | Vector/Range/Text/Filter/Count work today; `HybridQuery`, `AggregateHybridQuery`, and `MultiVectorQuery` types exist but runtime parity is incomplete; SQL is still absent |
-| Search Index | Sync + async lifecycle/load/info | In progress | Sync/async create/delete/load/fetch/search/query/batch/paginate are implemented; aggregate/multi-prefix/from-existing style parity is still missing |
-| Vectorizers | OpenAI/LiteLLM/Custom | In progress | `Vectorizer`, `AsyncVectorizer`, OpenAI-compatible adapters, and custom vectorizers are implemented; secondary providers are still missing |
+| Queries | Vector/Range/Text/Filter/Count/Hybrid/AggregateHybrid/MultiVector | In progress | All query types are implemented with command builders. `HybridQuery` generates `FT.HYBRID` commands (requires Redis 8.4+). `AggregateHybridQuery` generates `FT.AGGREGATE` commands. `MultiVectorQuery` generates multi-vector aggregate commands. Full end-to-end Redis 8.4 integration testing is still open |
+| Search Index | Sync + async lifecycle/load/info | In progress | Sync/async create/delete/load/fetch/search/query/batch/paginate, `hybrid_search`/`hybrid_query`, `aggregate_query`, `multi_vector_query`, and `from_existing` are implemented; multi-prefix index creation is supported |
+| SQL | `SQLQuery` behind `sql` feature | Implemented | SQL→Redis Search translation for non-aggregate `SELECT` queries: `WHERE` (tag/numeric/text/date comparisons, `IN`/`NOT IN`, `LIKE`/`NOT LIKE`, `BETWEEN`, `AND`/`OR`), `ORDER BY`, `LIMIT`/`OFFSET`, field projection. Aggregate queries (`COUNT`, `GROUP BY`) and vector/geo functions are not yet supported |
+| Vectorizers | OpenAI/LiteLLM/Custom + Azure/Cohere/VoyageAI/Mistral | In progress | `OpenAITextVectorizer`, `LiteLLMTextVectorizer`, `CustomTextVectorizer` plus `AzureOpenAITextVectorizer`, `CohereTextVectorizer`, `VoyageAITextVectorizer`, and `MistralAITextVectorizer` are implemented. Remaining: Vertex AI, Bedrock, HuggingFace local, Anthropic |
+| Rerankers | `CohereReranker` behind `rerankers` feature | Implemented | `Reranker`/`AsyncReranker` traits and `CohereReranker` with sync/async support are implemented. Additional reranker providers can be added incrementally |
 | Cache Extensions | Semantic + embeddings cache | In progress | `EmbeddingsCache` and `SemanticCache` are Redis-backed and parity-tested for core sync/async flows; broader LangCache attribute/config parity is still open |
-| Message History | MessageHistory/SemanticMessageHistory | In progress | Standard and semantic history are Redis-backed and parity-tested for ordered retrieval, semantic recall, scope, drop/count, and role filtering; dtype/default-vectorizer/from-existing parity is still missing |
+| Message History | MessageHistory/SemanticMessageHistory | In progress | Standard and semantic history are Redis-backed and parity-tested for ordered retrieval, semantic recall, scope, drop/count, and role filtering; dtype/default-vectorizer/reconnection parity is still missing |
 | Router | SemanticRouter/Route/RouteMatch | In progress | Redis-backed semantic router is implemented and parity-tested for routing, updates, and lifecycle behavior; serialization helpers, route reference APIs, and from-existing/provider parity are still open |
 | CLI | `rvl version/index/stats` | In progress | Basic command scaffold is implemented; richer command/flag parity and CLI tests are still missing |
-| SQL | `SQLQuery` | Planned | Future `sql` feature |
-| Rerankers | Provider rerankers | Planned | Future `rerankers` feature |
-| Benchmarks | Rust vs Python benchmark harness | Planned | No benchmark harness exists yet |
-| Docs/Examples | README/examples/API docs | In progress | Repo/doc scaffolding exists, but example coverage and publication-quality docs are still incomplete |
+| Benchmarks | Criterion micro-benchmarks | In progress | `criterion` benchmarks for schema parsing, filter rendering, and query building exist. Rust-vs-Python comparison harness is not yet implemented |
+| Docs/Examples | README/examples/API docs | In progress | Repo scaffolding, mdBook guide, and rustdoc exist but example coverage and publication-quality docs are still incomplete |
