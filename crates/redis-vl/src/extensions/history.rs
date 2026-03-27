@@ -12,6 +12,7 @@ use crate::{
     filter::Tag,
     index::{QueryOutput, RedisConnectionInfo, SearchIndex},
     query::{CountQuery, FilterQuery, SortDirection, Vector, VectorRangeQuery},
+    schema::VectorDataType,
     vectorizers::Vectorizer,
 };
 
@@ -409,6 +410,8 @@ pub struct SemanticMessageHistory {
     pub history: MessageHistory,
     /// Distance threshold used for semantic recall.
     pub distance_threshold: f32,
+    /// Vector element data type used for the index schema.
+    pub dtype: VectorDataType,
     /// Underlying search index for semantic lookups.
     pub index: SearchIndex,
     vectorizer: Arc<dyn Vectorizer>,
@@ -418,7 +421,8 @@ pub struct SemanticMessageHistory {
 impl SemanticMessageHistory {
     /// Creates a new semantic message history backed by a hash-based Redis Search index.
     ///
-    /// If `overwrite` is needed, use [`Self::new_with_options`] instead.
+    /// Uses [`VectorDataType::Float32`] by default. For other data types, use
+    /// [`Self::new_with_options`].
     pub fn new<V>(
         name: impl Into<String>,
         redis_url: impl Into<String>,
@@ -435,11 +439,12 @@ impl SemanticMessageHistory {
             distance_threshold,
             vector_dimensions,
             vectorizer,
+            VectorDataType::Float32,
             false,
         )
     }
 
-    /// Creates a new semantic message history with explicit overwrite control.
+    /// Creates a new semantic message history with explicit dtype and overwrite control.
     ///
     /// When `overwrite` is true the existing index is dropped and recreated.
     /// When false and an index with the same name already exists, the existing
@@ -450,6 +455,7 @@ impl SemanticMessageHistory {
         distance_threshold: f32,
         vector_dimensions: usize,
         vectorizer: V,
+        dtype: VectorDataType,
         overwrite: bool,
     ) -> Result<Self>
     where
@@ -466,7 +472,7 @@ impl SemanticMessageHistory {
         let redis_url = redis_url.into();
         let history = MessageHistory::new(name.clone(), redis_url.clone());
         let index = SearchIndex::from_json_value(
-            semantic_message_history_schema(&name, vector_dimensions),
+            semantic_message_history_schema(&name, vector_dimensions, dtype),
             redis_url,
         )?;
         index.create_with_options(overwrite, false)?;
@@ -474,6 +480,7 @@ impl SemanticMessageHistory {
         Ok(Self {
             history,
             distance_threshold,
+            dtype,
             index,
             vectorizer: Arc::new(vectorizer),
             vector_dimensions,
@@ -850,7 +857,11 @@ fn apply_role_filter(messages: &mut Vec<Message>, roles: Option<&[MessageRole]>)
     }
 }
 
-fn semantic_message_history_schema(name: &str, vector_dimensions: usize) -> Value {
+fn semantic_message_history_schema(
+    name: &str,
+    vector_dimensions: usize,
+    dtype: VectorDataType,
+) -> Value {
     json!({
         "index": {
             "name": name,
@@ -871,7 +882,7 @@ fn semantic_message_history_schema(name: &str, vector_dimensions: usize) -> Valu
                 "attrs": {
                     "algorithm": "flat",
                     "dims": vector_dimensions,
-                    "datatype": "float32",
+                    "datatype": dtype.as_str(),
                     "distance_metric": "cosine"
                 }
             }
@@ -1202,7 +1213,7 @@ mod tests {
 
     #[test]
     fn semantic_schema_has_expected_fields() {
-        let schema = semantic_message_history_schema("test_history", 128);
+        let schema = semantic_message_history_schema("test_history", 128, VectorDataType::Float32);
         let fields = schema["fields"].as_array().unwrap();
         let field_names: Vec<&str> = fields.iter().filter_map(|f| f["name"].as_str()).collect();
         assert!(field_names.contains(&"entry_id"));
@@ -1311,5 +1322,35 @@ mod tests {
     #[test]
     fn number_value_infinity_fails() {
         assert!(number_value(f64::INFINITY).is_err());
+    }
+
+    #[test]
+    fn semantic_schema_respects_dtype() {
+        let schema_f64 =
+            semantic_message_history_schema("test_history", 128, VectorDataType::Float64);
+        let fields = schema_f64["fields"].as_array().unwrap();
+        let vector_field = fields
+            .iter()
+            .find(|f| f["name"].as_str() == Some("message_vector"))
+            .unwrap();
+        assert_eq!(vector_field["attrs"]["datatype"], "float64");
+
+        let schema_bf16 =
+            semantic_message_history_schema("test_history", 128, VectorDataType::Bfloat16);
+        let fields = schema_bf16["fields"].as_array().unwrap();
+        let vector_field = fields
+            .iter()
+            .find(|f| f["name"].as_str() == Some("message_vector"))
+            .unwrap();
+        assert_eq!(vector_field["attrs"]["datatype"], "bfloat16");
+
+        let schema_f16 =
+            semantic_message_history_schema("test_history", 128, VectorDataType::Float16);
+        let fields = schema_f16["fields"].as_array().unwrap();
+        let vector_field = fields
+            .iter()
+            .find(|f| f["name"].as_str() == Some("message_vector"))
+            .unwrap();
+        assert_eq!(vector_field["attrs"]["datatype"], "float16");
     }
 }

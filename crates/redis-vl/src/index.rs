@@ -1671,6 +1671,25 @@ fn encode_vector_hash_field(
     }
 
     match attrs.datatype {
+        crate::schema::VectorDataType::Bfloat16 => {
+            let mut buffer = Vec::with_capacity(values.len() * 2);
+            for value in values {
+                let number = json_number_to_f64(value, field_name)? as f32;
+                // BFloat16: upper 16 bits of f32 (truncate mantissa)
+                let bits = number.to_bits();
+                let bf16 = (bits >> 16) as u16;
+                buffer.extend_from_slice(&bf16.to_le_bytes());
+            }
+            Ok(buffer)
+        }
+        crate::schema::VectorDataType::Float16 => {
+            let mut buffer = Vec::with_capacity(values.len() * 2);
+            for value in values {
+                let number = json_number_to_f64(value, field_name)? as f32;
+                buffer.extend_from_slice(&f32_to_f16_bytes(number).to_le_bytes());
+            }
+            Ok(buffer)
+        }
         crate::schema::VectorDataType::Float32 => {
             let mut buffer = Vec::with_capacity(values.len() * std::mem::size_of::<f32>());
             for value in values {
@@ -1696,6 +1715,40 @@ fn json_number_to_f64(value: &Value, field_name: &str) -> Result<f64> {
             "vector field '{field_name}' must be encoded from numeric JSON values"
         ))
     })
+}
+
+/// Converts an f32 value to IEEE 754 half-precision (float16) encoded as u16.
+fn f32_to_f16_bytes(value: f32) -> u16 {
+    let bits = value.to_bits();
+    let sign = (bits >> 16) & 0x8000;
+    let exponent = ((bits >> 23) & 0xFF) as i32;
+    let mantissa = bits & 0x007F_FFFF;
+
+    if exponent == 255 {
+        // Infinity or NaN
+        let m = if mantissa != 0 { 0x0200 } else { 0 };
+        return (sign | 0x7C00 | m) as u16;
+    }
+
+    let unbiased = exponent - 127;
+    if unbiased > 15 {
+        // Overflow → infinity
+        return (sign | 0x7C00) as u16;
+    }
+    if unbiased < -24 {
+        // Underflow → zero
+        return sign as u16;
+    }
+    if unbiased < -14 {
+        // Subnormal
+        let shift = -14 - unbiased;
+        let m = (mantissa | 0x0080_0000) >> (shift + 13);
+        return (sign | m) as u16;
+    }
+
+    let exp16 = ((unbiased + 15) as u32) << 10;
+    let m = mantissa >> 13;
+    (sign | exp16 | m) as u16
 }
 
 fn prepare_load_records<F>(data: &[Value], preprocess: &mut F) -> Result<Vec<Value>>
@@ -2067,8 +2120,9 @@ fn schema_from_info(name: &str, info: &Map<String, Value>) -> Result<IndexSchema
                     },
                 },
                 "VECTOR" => {
-                    let algo = match algorithm.as_str() {
+                    let algo = match algorithm.to_lowercase().as_str() {
                         "hnsw" => crate::schema::VectorAlgorithm::Hnsw,
+                        "svs-vamana" | "svs_vamana" => crate::schema::VectorAlgorithm::SvsVamana,
                         _ => crate::schema::VectorAlgorithm::Flat,
                     };
                     let dm = match distance_metric.as_str() {
@@ -2076,8 +2130,10 @@ fn schema_from_info(name: &str, info: &Map<String, Value>) -> Result<IndexSchema
                         "ip" => crate::schema::VectorDistanceMetric::Ip,
                         _ => crate::schema::VectorDistanceMetric::Cosine,
                     };
-                    let dt = match datatype.as_str() {
+                    let dt = match datatype.to_lowercase().as_str() {
                         "float64" => crate::schema::VectorDataType::Float64,
+                        "float16" => crate::schema::VectorDataType::Float16,
+                        "bfloat16" => crate::schema::VectorDataType::Bfloat16,
                         _ => crate::schema::VectorDataType::Float32,
                     };
                     FieldKind::Vector {
@@ -2092,6 +2148,12 @@ fn schema_from_info(name: &str, info: &Map<String, Value>) -> Result<IndexSchema
                             ef_construction: None,
                             ef_runtime: None,
                             epsilon: None,
+                            graph_max_degree: None,
+                            construction_window_size: None,
+                            search_window_size: None,
+                            compression: None,
+                            reduce: None,
+                            training_threshold: None,
                         },
                     }
                 }
@@ -2830,5 +2892,27 @@ mod tests {
         assert_eq!(index.prefix(), "pfx_a");
         // create_cmd is exercised end-to-end via integration tests.
         let _cmd = index.create_cmd();
+    }
+
+    #[test]
+    fn f32_to_f16_basic_values() {
+        use super::f32_to_f16_bytes;
+
+        // Zero → 0x0000
+        assert_eq!(f32_to_f16_bytes(0.0), 0x0000);
+        // Negative zero → 0x8000
+        assert_eq!(f32_to_f16_bytes(-0.0), 0x8000);
+        // 1.0 → 0x3C00
+        assert_eq!(f32_to_f16_bytes(1.0), 0x3C00);
+        // -1.0 → 0xBC00
+        assert_eq!(f32_to_f16_bytes(-1.0), 0xBC00);
+        // Infinity → 0x7C00
+        assert_eq!(f32_to_f16_bytes(f32::INFINITY), 0x7C00);
+        // Negative infinity → 0xFC00
+        assert_eq!(f32_to_f16_bytes(f32::NEG_INFINITY), 0xFC00);
+        // NaN → sign | 0x7C00 | some mantissa bits
+        let nan_bits = f32_to_f16_bytes(f32::NAN);
+        assert_eq!(nan_bits & 0x7C00, 0x7C00, "NaN exponent should be all ones");
+        assert_ne!(nan_bits & 0x03FF, 0, "NaN should have non-zero mantissa");
     }
 }

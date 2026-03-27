@@ -9,6 +9,7 @@ use crate::{
     error::{Error, Result},
     index::{QueryOutput, RedisConnectionInfo, SearchIndex},
     query::{Vector, VectorRangeQuery},
+    schema::VectorDataType,
     vectorizers::Vectorizer,
 };
 
@@ -109,6 +110,8 @@ pub struct SemanticRouter {
     pub routes: Vec<Route>,
     /// Runtime routing configuration.
     pub routing_config: RoutingConfig,
+    /// Vector element data type used for the index schema.
+    pub dtype: VectorDataType,
     /// Underlying search index used for route references.
     pub index: SearchIndex,
     vectorizer: Arc<dyn Vectorizer>,
@@ -118,9 +121,8 @@ pub struct SemanticRouter {
 impl SemanticRouter {
     /// Creates a new semantic router and loads the provided routes into Redis.
     ///
-    /// If `overwrite` is false and an index with the same name already exists,
-    /// the existing index is reused without re-loading routes.  When `overwrite`
-    /// is true the index is dropped and recreated.
+    /// Uses [`VectorDataType::Float32`] by default. For other data types, use
+    /// [`Self::new_with_options`].
     pub fn new<V>(
         name: impl Into<String>,
         redis_url: impl Into<String>,
@@ -131,16 +133,25 @@ impl SemanticRouter {
     where
         V: Vectorizer + 'static,
     {
-        Self::new_with_options(name, redis_url, routes, routing_config, vectorizer, false)
+        Self::new_with_options(
+            name,
+            redis_url,
+            routes,
+            routing_config,
+            vectorizer,
+            VectorDataType::Float32,
+            false,
+        )
     }
 
-    /// Creates a new semantic router with explicit overwrite control.
+    /// Creates a new semantic router with explicit dtype and overwrite control.
     pub fn new_with_options<V>(
         name: impl Into<String>,
         redis_url: impl Into<String>,
         routes: Vec<Route>,
         routing_config: RoutingConfig,
         vectorizer: V,
+        dtype: VectorDataType,
         overwrite: bool,
     ) -> Result<Self>
     where
@@ -173,7 +184,7 @@ impl SemanticRouter {
 
         let name = name.into();
         let connection = RedisConnectionInfo::new(redis_url);
-        let schema = router_schema(&name, probe_vector.len());
+        let schema = router_schema(&name, probe_vector.len(), dtype);
         let index = SearchIndex::from_json_value(schema, connection.redis_url.clone())?;
         let existed = index.exists().unwrap_or(false);
         index.create_with_options(overwrite, false)?;
@@ -183,6 +194,7 @@ impl SemanticRouter {
             connection,
             routes,
             routing_config,
+            dtype,
             index,
             vectorizer,
             vector_dimensions: probe_vector.len(),
@@ -200,10 +212,14 @@ impl SemanticRouter {
     /// The router configuration (name, routes, routing config) must have been
     /// previously persisted by a [`SemanticRouter::new`] call.  The vectorizer
     /// must be supplied by the caller since vectorizers cannot be serialized.
+    ///
+    /// The `dtype` parameter must match the data type used when the router was
+    /// originally created; otherwise the schema comparison will fail.
     pub fn from_existing<V>(
         name: impl Into<String>,
         redis_url: impl Into<String>,
         vectorizer: V,
+        dtype: VectorDataType,
     ) -> Result<Self>
     where
         V: Vectorizer + 'static,
@@ -250,7 +266,7 @@ impl SemanticRouter {
         let probe = vectorizer.embed(first_ref)?;
         let vector_dimensions = probe.len();
 
-        let schema = router_schema(&name, vector_dimensions);
+        let schema = router_schema(&name, vector_dimensions, dtype);
         let index = SearchIndex::from_json_value(schema, connection.redis_url.clone())?;
         // The index should already exist
         if !index.exists().unwrap_or(false) {
@@ -264,6 +280,7 @@ impl SemanticRouter {
             connection,
             routes,
             routing_config,
+            dtype,
             index,
             vectorizer,
             vector_dimensions,
@@ -666,6 +683,7 @@ impl SemanticRouter {
         file_path: impl AsRef<Path>,
         redis_url: impl Into<String>,
         vectorizer: V,
+        dtype: VectorDataType,
         overwrite: bool,
     ) -> Result<Self>
     where
@@ -682,7 +700,7 @@ impl SemanticRouter {
             .map_err(|e| Error::InvalidInput(format!("Cannot open file: {e}")))?;
         let dict: Value = serde_yaml::from_reader(file)
             .map_err(|e| Error::InvalidInput(format!("YAML deserialization error: {e}")))?;
-        Self::from_dict(dict, redis_url, vectorizer, overwrite)
+        Self::from_dict(dict, redis_url, vectorizer, dtype, overwrite)
     }
 
     /// Creates a semantic router from a previously serialized JSON value.
@@ -693,6 +711,7 @@ impl SemanticRouter {
         data: Value,
         redis_url: impl Into<String>,
         vectorizer: V,
+        dtype: VectorDataType,
         overwrite: bool,
     ) -> Result<Self>
     where
@@ -732,6 +751,7 @@ impl SemanticRouter {
             routes,
             routing_config,
             vectorizer,
+            dtype,
             overwrite,
         )
     }
@@ -900,7 +920,7 @@ fn router_config_key(name: &str) -> String {
     format!("{name}:route_config")
 }
 
-fn router_schema(name: &str, vector_dimensions: usize) -> Value {
+fn router_schema(name: &str, vector_dimensions: usize, dtype: VectorDataType) -> Value {
     json!({
         "index": {
             "name": name,
@@ -917,7 +937,7 @@ fn router_schema(name: &str, vector_dimensions: usize) -> Value {
                 "attrs": {
                     "algorithm": "flat",
                     "dims": vector_dimensions,
-                    "datatype": "float32",
+                    "datatype": dtype.as_str(),
                     "distance_metric": "cosine"
                 }
             }
@@ -1146,7 +1166,7 @@ mod tests {
 
     #[test]
     fn router_schema_structure() {
-        let schema = router_schema("my_router", 64);
+        let schema = router_schema("my_router", 64, VectorDataType::Float32);
         assert_eq!(schema["index"]["name"], "my_router");
         assert_eq!(schema["index"]["prefix"], "my_router");
         assert_eq!(schema["index"]["storage_type"], "hash");
@@ -1192,5 +1212,32 @@ mod tests {
     #[test]
     fn router_config_key_format() {
         assert_eq!(router_config_key("my_router"), "my_router:route_config");
+    }
+
+    #[test]
+    fn router_schema_respects_dtype() {
+        let schema_f64 = router_schema("my_router", 64, VectorDataType::Float64);
+        let fields = schema_f64["fields"].as_array().unwrap();
+        let vector_field = fields
+            .iter()
+            .find(|f| f["name"].as_str() == Some("vector"))
+            .unwrap();
+        assert_eq!(vector_field["attrs"]["datatype"], "float64");
+
+        let schema_bf16 = router_schema("my_router", 64, VectorDataType::Bfloat16);
+        let fields = schema_bf16["fields"].as_array().unwrap();
+        let vector_field = fields
+            .iter()
+            .find(|f| f["name"].as_str() == Some("vector"))
+            .unwrap();
+        assert_eq!(vector_field["attrs"]["datatype"], "bfloat16");
+
+        let schema_f16 = router_schema("my_router", 64, VectorDataType::Float16);
+        let fields = schema_f16["fields"].as_array().unwrap();
+        let vector_field = fields
+            .iter()
+            .find(|f| f["name"].as_str() == Some("vector"))
+            .unwrap();
+        assert_eq!(vector_field["attrs"]["datatype"], "float16");
     }
 }

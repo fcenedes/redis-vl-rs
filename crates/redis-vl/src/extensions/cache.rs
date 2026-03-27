@@ -13,6 +13,7 @@ use crate::{
     filter::FilterExpression,
     index::{AsyncSearchIndex, QueryOutput, RedisConnectionInfo, SearchIndex},
     query::{Vector, VectorRangeQuery},
+    schema::VectorDataType,
     vectorizers::Vectorizer,
 };
 
@@ -99,6 +100,8 @@ pub struct SemanticCache {
     pub distance_threshold: f32,
     /// Prompt embedding dimensions stored in Redis.
     pub vector_dimensions: usize,
+    /// Vector element data type used for the index schema.
+    pub dtype: VectorDataType,
     /// Underlying search index.
     pub index: SearchIndex,
     vectorizer: Option<Arc<dyn Vectorizer>>,
@@ -112,7 +115,23 @@ impl SemanticCache {
         distance_threshold: f32,
         vector_dimensions: usize,
     ) -> Result<Self> {
-        Self::with_filterable_fields(config, distance_threshold, vector_dimensions, &[])
+        Self::with_options(
+            config,
+            distance_threshold,
+            vector_dimensions,
+            VectorDataType::Float32,
+            &[],
+        )
+    }
+
+    /// Creates a new semantic cache with a specific vector data type.
+    pub fn with_dtype(
+        config: CacheConfig,
+        distance_threshold: f32,
+        vector_dimensions: usize,
+        dtype: VectorDataType,
+    ) -> Result<Self> {
+        Self::with_options(config, distance_threshold, vector_dimensions, dtype, &[])
     }
 
     /// Creates a new semantic cache with additional filterable schema fields.
@@ -120,6 +139,23 @@ impl SemanticCache {
         config: CacheConfig,
         distance_threshold: f32,
         vector_dimensions: usize,
+        filterable_fields: &[Value],
+    ) -> Result<Self> {
+        Self::with_options(
+            config,
+            distance_threshold,
+            vector_dimensions,
+            VectorDataType::Float32,
+            filterable_fields,
+        )
+    }
+
+    /// Creates a new semantic cache with full control over dtype and filterable fields.
+    pub fn with_options(
+        config: CacheConfig,
+        distance_threshold: f32,
+        vector_dimensions: usize,
+        dtype: VectorDataType,
         filterable_fields: &[Value],
     ) -> Result<Self> {
         validate_distance_threshold(distance_threshold)?;
@@ -130,7 +166,8 @@ impl SemanticCache {
         }
         validate_filterable_fields(filterable_fields)?;
 
-        let schema = semantic_cache_schema(&config.name, vector_dimensions, filterable_fields);
+        let schema =
+            semantic_cache_schema(&config.name, vector_dimensions, dtype, filterable_fields);
         let index = SearchIndex::from_json_value(schema, config.connection.redis_url.clone())?;
         if !index.exists().unwrap_or(false) {
             index.create_with_options(false, false)?;
@@ -140,6 +177,7 @@ impl SemanticCache {
             config,
             distance_threshold,
             vector_dimensions,
+            dtype,
             index,
             vectorizer: None,
             return_fields: default_semantic_return_fields(),
@@ -1144,6 +1182,7 @@ fn hashify(content: &str) -> String {
 fn semantic_cache_schema(
     name: &str,
     vector_dimensions: usize,
+    dtype: VectorDataType,
     filterable_fields: &[Value],
 ) -> Value {
     let mut fields = vec![
@@ -1159,7 +1198,7 @@ fn semantic_cache_schema(
             "attrs": {
                 "algorithm": "flat",
                 "dims": vector_dimensions,
-                "datatype": "float32",
+                "datatype": dtype.as_str(),
                 "distance_metric": "cosine"
             }
         }),
@@ -1499,5 +1538,46 @@ mod tests {
         let cache = EmbeddingsCache::new(config);
         assert_eq!(cache.config.name, "custom_cache");
         assert_eq!(cache.config.ttl_seconds, Some(60));
+    }
+
+    #[test]
+    fn semantic_cache_schema_respects_dtype() {
+        use super::{VectorDataType, semantic_cache_schema};
+
+        let schema_f32 = semantic_cache_schema("test", 128, VectorDataType::Float32, &[]);
+        let vec_field = schema_f32["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["name"] == "prompt_vector")
+            .unwrap();
+        assert_eq!(vec_field["attrs"]["datatype"], "float32");
+
+        let schema_f64 = semantic_cache_schema("test", 128, VectorDataType::Float64, &[]);
+        let vec_field = schema_f64["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["name"] == "prompt_vector")
+            .unwrap();
+        assert_eq!(vec_field["attrs"]["datatype"], "float64");
+
+        let schema_bf16 = semantic_cache_schema("test", 128, VectorDataType::Bfloat16, &[]);
+        let vec_field = schema_bf16["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["name"] == "prompt_vector")
+            .unwrap();
+        assert_eq!(vec_field["attrs"]["datatype"], "bfloat16");
+
+        let schema_f16 = semantic_cache_schema("test", 128, VectorDataType::Float16, &[]);
+        let vec_field = schema_f16["fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["name"] == "prompt_vector")
+            .unwrap();
+        assert_eq!(vec_field["attrs"]["datatype"], "float16");
     }
 }

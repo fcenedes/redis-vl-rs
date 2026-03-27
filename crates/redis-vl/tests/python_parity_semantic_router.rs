@@ -373,6 +373,7 @@ fn python_test_router_from_dict() {
         dict.clone(),
         redis_url(),
         CustomTextVectorizer::new(|text| Ok(embed_text(text))),
+        redis_vl::schema::VectorDataType::Float32,
         true, // overwrite to reuse the same index
     )
     .expect("from_dict should succeed");
@@ -396,6 +397,7 @@ fn python_test_router_from_dict_missing_fields() {
         data,
         redis_url(),
         CustomTextVectorizer::new(|text| Ok(embed_text(text))),
+        redis_vl::schema::VectorDataType::Float32,
         false,
     );
     // Missing routing_config → should fail
@@ -428,6 +430,7 @@ fn python_test_router_from_existing() {
         name.clone(),
         redis_url(),
         CustomTextVectorizer::new(|text| Ok(embed_text(text))),
+        redis_vl::schema::VectorDataType::Float32,
     )
     .expect("from_existing should succeed");
 
@@ -465,6 +468,7 @@ fn python_test_router_yaml_round_trip() {
         &yaml_path,
         redis_url(),
         CustomTextVectorizer::new(|text| Ok(embed_text(text))),
+        redis_vl::schema::VectorDataType::Float32,
         true, // overwrite
     )
     .expect("from_yaml should succeed");
@@ -490,6 +494,7 @@ fn python_test_router_yaml_invalid_file_path() {
         "nonexistent_path_xyz.yaml",
         redis_url(),
         CustomTextVectorizer::new(|text| Ok(embed_text(text))),
+        redis_vl::schema::VectorDataType::Float32,
         false,
     );
     assert!(result.is_err());
@@ -507,6 +512,7 @@ fn python_test_router_idempotent_to_dict() {
         dict.clone(),
         redis_url(),
         CustomTextVectorizer::new(|text| Ok(embed_text(text))),
+        redis_vl::schema::VectorDataType::Float32,
         true,
     )
     .expect("from_dict should succeed");
@@ -538,6 +544,7 @@ fn python_test_routes_different_distance_thresholds_get_two() {
             aggregation_method: DistanceAggregationMethod::Avg,
         },
         CustomTextVectorizer::new(|text| Ok(embed_text(text))),
+        redis_vl::schema::VectorDataType::Float32,
         true,
     )
     .expect("router should initialize");
@@ -578,6 +585,7 @@ fn python_test_routes_different_distance_thresholds_get_one() {
             aggregation_method: DistanceAggregationMethod::Avg,
         },
         CustomTextVectorizer::new(|text| Ok(embed_text(text))),
+        redis_vl::schema::VectorDataType::Float32,
         true,
     )
     .expect("router should initialize");
@@ -622,6 +630,7 @@ fn python_test_router_persist_after_add_references() {
         name,
         redis_url(),
         CustomTextVectorizer::new(|text| Ok(embed_text(text))),
+        redis_vl::schema::VectorDataType::Float32,
     )
     .expect("from_existing should succeed");
 

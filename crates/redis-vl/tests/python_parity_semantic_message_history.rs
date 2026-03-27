@@ -322,6 +322,7 @@ fn python_test_semantic_history_overwrite() {
         0.5,
         VECTOR_DIMENSIONS,
         CustomTextVectorizer::new(|text| Ok(embed_text(text))),
+        redis_vl::schema::VectorDataType::Float32,
         false,
     )
     .expect("first create should succeed");
@@ -338,6 +339,7 @@ fn python_test_semantic_history_overwrite() {
         0.5,
         VECTOR_DIMENSIONS,
         CustomTextVectorizer::new(|text| Ok(embed_text(text))),
+        redis_vl::schema::VectorDataType::Float32,
         true,
     )
     .expect("overwrite create should succeed");
