@@ -11,7 +11,7 @@ use crate::{
     error::{Error, Result},
     filter::FilterExpression,
     query::{PageableQuery, QueryKind, QueryParamValue, QueryString, SortDirection},
-    schema::{FieldKind, IndexSchema, StorageType, VectorAlgorithm},
+    schema::{FieldKind, IndexDefinition, IndexSchema, StorageType, VectorAlgorithm},
 };
 
 /// Redis connection settings for index operations.
@@ -682,6 +682,36 @@ impl SearchIndex {
         Ok(QueryOutput::Documents(documents))
     }
 
+    /// Executes an [`AggregateHybridQuery`] via `FT.AGGREGATE` and returns
+    /// processed documents.
+    ///
+    /// Mirrors the Python `_aggregate()` code path.
+    pub fn aggregate_query(
+        &self,
+        query: &crate::query::AggregateHybridQuery<'_>,
+    ) -> Result<QueryOutput> {
+        let client = self.connection.client()?;
+        let mut connection = client.get_connection()?;
+        let cmd = query.build_aggregate_cmd(self.name());
+        let value: redis::Value = cmd.query(&mut connection)?;
+        let documents = parse_aggregate_result(value)?;
+        Ok(QueryOutput::Documents(documents))
+    }
+
+    /// Constructs a [`SearchIndex`] from an existing Redis index by reading
+    /// `FT.INFO` and reconstructing the schema.
+    ///
+    /// Mirrors Python `SearchIndex.from_existing(name, redis_url=...)`.
+    pub fn from_existing(name: &str, redis_url: impl Into<String>) -> Result<Self> {
+        let connection = RedisConnectionInfo::new(redis_url);
+        let client = connection.client()?;
+        let mut conn = client.get_connection()?;
+        let value = redis::cmd("FT.INFO").arg(name).query(&mut conn)?;
+        let info = parse_info_response(value)?;
+        let schema = schema_from_info(name, &info)?;
+        Ok(Self { schema, connection })
+    }
+
     /// Executes a query and returns the raw Redis response.
     pub fn search_raw<Q>(&self, query: &Q) -> Result<redis::Value>
     where
@@ -1309,6 +1339,37 @@ impl AsyncSearchIndex {
         }
         Ok(QueryOutput::Documents(documents))
     }
+
+    /// Executes an [`AggregateHybridQuery`] asynchronously via `FT.AGGREGATE`
+    /// and returns processed documents.
+    pub async fn aggregate_query(
+        &self,
+        query: &crate::query::AggregateHybridQuery<'_>,
+    ) -> Result<QueryOutput> {
+        let client = self.connection.client()?;
+        let mut connection = client.get_multiplexed_async_connection().await?;
+        let cmd = query.build_aggregate_cmd(self.name());
+        let value: redis::Value = cmd.query_async(&mut connection).await?;
+        let documents = parse_aggregate_result(value)?;
+        Ok(QueryOutput::Documents(documents))
+    }
+
+    /// Constructs an [`AsyncSearchIndex`] from an existing Redis index by
+    /// reading `FT.INFO` and reconstructing the schema.
+    ///
+    /// Mirrors Python `AsyncSearchIndex.from_existing(name, redis_url=...)`.
+    pub async fn from_existing(name: &str, redis_url: impl Into<String>) -> Result<Self> {
+        let connection = RedisConnectionInfo::new(redis_url);
+        let client = connection.client()?;
+        let mut conn = client.get_multiplexed_async_connection().await?;
+        let value: redis::Value = redis::cmd("FT.INFO")
+            .arg(name)
+            .query_async(&mut conn)
+            .await?;
+        let info = parse_info_response(value)?;
+        let schema = schema_from_info(name, &info)?;
+        Ok(Self { schema, connection })
+    }
 }
 
 #[allow(dead_code)]
@@ -1508,6 +1569,331 @@ fn parse_info_response(value: redis::Value) -> Result<Map<String, Value>> {
     Ok(info)
 }
 
+/// Parses an `FT.AGGREGATE` response into a list of document maps.
+///
+/// Redis `FT.AGGREGATE` returns an array: `[total, [field, value, ...], ...]`.
+fn parse_aggregate_result(value: redis::Value) -> Result<Vec<Map<String, Value>>> {
+    let entries = match value {
+        redis::Value::Array(entries) => entries,
+        redis::Value::Nil => return Ok(Vec::new()),
+        other => {
+            return Err(Error::InvalidInput(format!(
+                "expected FT.AGGREGATE array response, received {other:?}"
+            )));
+        }
+    };
+
+    let mut it = entries.into_iter();
+
+    // First element is the total count (we skip it for doc processing)
+    let _total = it.next();
+
+    let mut documents = Vec::new();
+    for row in it {
+        let row_entries = match row {
+            redis::Value::Array(entries) => entries,
+            redis::Value::Map(entries) => entries
+                .into_iter()
+                .flat_map(|(k, v)| [k, v])
+                .collect::<Vec<_>>(),
+            _ => continue,
+        };
+
+        let mut pairs = VecDeque::from(row_entries);
+        let mut map = Map::new();
+        while let Some(key) = pairs.pop_front() {
+            let Some(val) = pairs.pop_front() else { break };
+            let field = redis_value_to_string(&key)?;
+            if field == "__score" {
+                continue; // Strip internal score like Python
+            }
+            map.insert(field, redis_value_to_json(val)?);
+        }
+        documents.push(map);
+    }
+
+    Ok(documents)
+}
+
+/// Reconstructs an [`IndexSchema`] from parsed `FT.INFO` output.
+///
+/// Mirrors Python `convert_index_info_to_schema`.
+fn schema_from_info(name: &str, info: &Map<String, Value>) -> Result<IndexSchema> {
+    // Extract storage type and prefixes from index_definition
+    let index_def = info.get("index_definition").and_then(Value::as_array);
+
+    let mut storage_type = StorageType::Hash;
+    let mut prefix = crate::schema::Prefix::default();
+
+    if let Some(def_arr) = index_def {
+        // index_definition is a flat array: [key, value, key, value, ...]
+        let mut i = 0;
+        while i + 1 < def_arr.len() {
+            let key = def_arr[i].as_str().unwrap_or("");
+            match key {
+                "key_type" => {
+                    if let Some(v) = def_arr[i + 1].as_str() {
+                        storage_type = match v.to_uppercase().as_str() {
+                            "JSON" => StorageType::Json,
+                            _ => StorageType::Hash,
+                        };
+                    }
+                }
+                "prefixes" => {
+                    if let Some(arr) = def_arr[i + 1].as_array() {
+                        let prefixes: Vec<String> = arr
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(String::from)
+                            .collect();
+                        prefix = if prefixes.len() == 1 {
+                            crate::schema::Prefix::Single(prefixes.into_iter().next().unwrap())
+                        } else {
+                            crate::schema::Prefix::Multi(prefixes)
+                        };
+                    }
+                }
+                _ => {}
+            }
+            i += 2;
+        }
+    }
+
+    // Parse attributes (fields)
+    let attributes = info.get("attributes").and_then(Value::as_array);
+    let mut fields = Vec::new();
+
+    if let Some(attrs) = attributes {
+        for attr_val in attrs {
+            let attr_arr = match attr_val.as_array() {
+                Some(arr) => arr,
+                None => continue,
+            };
+
+            if attr_arr.is_empty() {
+                continue;
+            }
+
+            // Parse the flat attribute array: [identifier, name, ...]
+            let mut field_name = String::new();
+            let mut field_type = String::new();
+            let mut sortable = false;
+            let mut no_index = false;
+            let mut case_sensitive = false;
+            let mut separator: Option<String> = None;
+            let mut weight: Option<f32> = None;
+            let mut no_stem = false;
+            let mut with_suffix_trie = false;
+            let mut phonetic: Option<String> = None;
+            // Vector attrs
+            let mut algorithm = String::new();
+            let mut dims: usize = 0;
+            let mut distance_metric = String::new();
+            let mut datatype = String::new();
+
+            let mut i = 0;
+            while i < attr_arr.len() {
+                let key = attr_arr[i].as_str().unwrap_or("");
+                match key {
+                    "identifier" | "attribute" => {
+                        if i + 1 < attr_arr.len() {
+                            if let Some(v) = attr_arr[i + 1].as_str() {
+                                if key == "attribute" || field_name.is_empty() {
+                                    field_name = v.to_owned();
+                                }
+                            }
+                        }
+                        i += 2;
+                    }
+                    "type" => {
+                        if i + 1 < attr_arr.len() {
+                            if let Some(v) = attr_arr[i + 1].as_str() {
+                                field_type = v.to_uppercase();
+                            }
+                        }
+                        i += 2;
+                    }
+                    "SORTABLE" => {
+                        sortable = true;
+                        i += 1;
+                    }
+                    "NOINDEX" => {
+                        no_index = true;
+                        i += 1;
+                    }
+                    "CASESENSITIVE" => {
+                        case_sensitive = true;
+                        i += 1;
+                    }
+                    "NOSTEM" => {
+                        no_stem = true;
+                        i += 1;
+                    }
+                    "WITHSUFFIXTRIE" => {
+                        with_suffix_trie = true;
+                        i += 1;
+                    }
+                    "SEPARATOR" => {
+                        if i + 1 < attr_arr.len() {
+                            separator = attr_arr[i + 1].as_str().map(String::from);
+                        }
+                        i += 2;
+                    }
+                    "WEIGHT" => {
+                        if i + 1 < attr_arr.len() {
+                            weight = attr_arr[i + 1]
+                                .as_str()
+                                .and_then(|s| s.parse::<f32>().ok())
+                                .or_else(|| attr_arr[i + 1].as_f64().map(|v| v as f32));
+                        }
+                        i += 2;
+                    }
+                    "PHONETIC" => {
+                        if i + 1 < attr_arr.len() {
+                            phonetic = attr_arr[i + 1].as_str().map(String::from);
+                        }
+                        i += 2;
+                    }
+                    _ if field_type == "VECTOR" => {
+                        // Once we hit VECTOR type, remaining entries are vector params
+                        // Format: algorithm, param_count, key, value, key, value, ...
+                        // Or: key, value, key, value, ...
+                        let upper = key.to_uppercase();
+                        if upper == "FLAT" || upper == "HNSW" {
+                            algorithm = upper.to_lowercase();
+                            i += 1;
+                            // Next might be a param count, skip it
+                            if i < attr_arr.len() {
+                                if attr_arr[i]
+                                    .as_str()
+                                    .and_then(|s| s.parse::<usize>().ok())
+                                    .is_some()
+                                    || attr_arr[i].as_i64().is_some()
+                                {
+                                    i += 1; // skip count
+                                }
+                            }
+                        } else if upper == "ALGORITHM" {
+                            if i + 1 < attr_arr.len() {
+                                algorithm =
+                                    attr_arr[i + 1].as_str().unwrap_or("flat").to_lowercase();
+                            }
+                            i += 2;
+                        } else if upper == "DIM" || upper == "DIMS" {
+                            if i + 1 < attr_arr.len() {
+                                dims = attr_arr[i + 1]
+                                    .as_str()
+                                    .and_then(|s| s.parse().ok())
+                                    .or_else(|| attr_arr[i + 1].as_u64().map(|v| v as usize))
+                                    .unwrap_or(0);
+                            }
+                            i += 2;
+                        } else if upper == "DISTANCE_METRIC" {
+                            if i + 1 < attr_arr.len() {
+                                distance_metric =
+                                    attr_arr[i + 1].as_str().unwrap_or("cosine").to_lowercase();
+                            }
+                            i += 2;
+                        } else if upper == "TYPE" || upper == "DATA_TYPE" || upper == "DATATYPE" {
+                            if i + 1 < attr_arr.len() {
+                                datatype =
+                                    attr_arr[i + 1].as_str().unwrap_or("float32").to_lowercase();
+                            }
+                            i += 2;
+                        } else {
+                            // Skip unknown vector param
+                            i += 2;
+                        }
+                    }
+                    _ => {
+                        i += 1;
+                    }
+                }
+            }
+
+            // Strip JSON path prefix from field name
+            let field_name = field_name
+                .strip_prefix("$.")
+                .unwrap_or(&field_name)
+                .to_owned();
+
+            let kind = match field_type.as_str() {
+                "TAG" => FieldKind::Tag {
+                    attrs: crate::schema::TagFieldAttributes {
+                        separator,
+                        case_sensitive,
+                        sortable,
+                        no_index,
+                    },
+                },
+                "TEXT" => FieldKind::Text {
+                    attrs: crate::schema::TextFieldAttributes {
+                        weight,
+                        sortable,
+                        no_stem,
+                        no_index,
+                        phonetic,
+                        with_suffix_trie,
+                    },
+                },
+                "NUMERIC" => FieldKind::Numeric {
+                    attrs: crate::schema::NumericFieldAttributes { sortable, no_index },
+                },
+                "GEO" => FieldKind::Geo {
+                    attrs: crate::schema::GeoFieldAttributes { sortable, no_index },
+                },
+                "VECTOR" => {
+                    let algo = match algorithm.as_str() {
+                        "hnsw" => crate::schema::VectorAlgorithm::Hnsw,
+                        _ => crate::schema::VectorAlgorithm::Flat,
+                    };
+                    let dm = match distance_metric.as_str() {
+                        "l2" => crate::schema::VectorDistanceMetric::L2,
+                        "ip" => crate::schema::VectorDistanceMetric::Ip,
+                        _ => crate::schema::VectorDistanceMetric::Cosine,
+                    };
+                    let dt = match datatype.as_str() {
+                        "float64" => crate::schema::VectorDataType::Float64,
+                        _ => crate::schema::VectorDataType::Float32,
+                    };
+                    FieldKind::Vector {
+                        attrs: crate::schema::VectorFieldAttributes {
+                            algorithm: algo,
+                            dims,
+                            distance_metric: dm,
+                            datatype: dt,
+                            initial_cap: None,
+                            block_size: None,
+                            m: None,
+                            ef_construction: None,
+                            ef_runtime: None,
+                            epsilon: None,
+                        },
+                    }
+                }
+                _ => continue, // skip unknown field types
+            };
+
+            fields.push(crate::schema::Field {
+                name: field_name,
+                path: None,
+                kind,
+            });
+        }
+    }
+
+    Ok(IndexSchema {
+        index: IndexDefinition {
+            name: name.to_owned(),
+            prefix,
+            key_separator: ":".to_owned(),
+            storage_type,
+            stopwords: Vec::new(),
+        },
+        fields,
+    })
+}
+
 fn process_search_result<Q>(
     results: SearchResult,
     query: &Q,
@@ -1678,8 +2064,8 @@ fn redis_value_to_json(value: redis::Value) -> Result<Value> {
 mod tests {
     use super::{
         EncodedHashValue, QueryOutput, SearchDocument, SearchIndex, SearchResult, compose_key,
-        encode_hash_record, parse_info_response, parse_search_result, prepare_load_records,
-        process_search_result,
+        encode_hash_record, parse_aggregate_result, parse_info_response, parse_search_result,
+        prepare_load_records, process_search_result, schema_from_info,
     };
     use crate::{
         filter::Tag,
@@ -2054,6 +2440,145 @@ mod tests {
         match embedding {
             EncodedHashValue::Binary(bytes) => assert_eq!(bytes.len(), 12),
             EncodedHashValue::String(_) => panic!("vector field should encode to binary bytes"),
+        }
+    }
+
+    // ── parse_aggregate_result parity tests ──
+
+    #[test]
+    fn parse_aggregate_result_should_produce_document_maps() {
+        // Simulate FT.AGGREGATE response: [total, [k, v, ...], [k, v, ...]]
+        let value = redis::Value::Array(vec![
+            redis::Value::Int(2),
+            redis::Value::Array(vec![
+                redis::Value::BulkString(b"user".to_vec()),
+                redis::Value::BulkString(b"alice".to_vec()),
+                redis::Value::BulkString(b"hybrid_score".to_vec()),
+                redis::Value::BulkString(b"0.85".to_vec()),
+            ]),
+            redis::Value::Array(vec![
+                redis::Value::BulkString(b"user".to_vec()),
+                redis::Value::BulkString(b"bob".to_vec()),
+                redis::Value::BulkString(b"hybrid_score".to_vec()),
+                redis::Value::BulkString(b"0.72".to_vec()),
+            ]),
+        ]);
+
+        let docs = parse_aggregate_result(value).expect("should parse");
+        assert_eq!(docs.len(), 2);
+        assert_eq!(docs[0]["user"], "alice");
+        assert_eq!(docs[0]["hybrid_score"], "0.85");
+        assert_eq!(docs[1]["user"], "bob");
+    }
+
+    #[test]
+    fn parse_aggregate_result_should_strip_internal_score() {
+        let value = redis::Value::Array(vec![
+            redis::Value::Int(1),
+            redis::Value::Array(vec![
+                redis::Value::BulkString(b"__score".to_vec()),
+                redis::Value::BulkString(b"1.0".to_vec()),
+                redis::Value::BulkString(b"user".to_vec()),
+                redis::Value::BulkString(b"alice".to_vec()),
+            ]),
+        ]);
+
+        let docs = parse_aggregate_result(value).expect("should parse");
+        assert_eq!(docs.len(), 1);
+        assert!(
+            !docs[0].contains_key("__score"),
+            "internal __score should be stripped"
+        );
+        assert_eq!(docs[0]["user"], "alice");
+    }
+
+    #[test]
+    fn parse_aggregate_result_should_handle_nil() {
+        let docs = parse_aggregate_result(redis::Value::Nil).expect("should parse");
+        assert!(docs.is_empty());
+    }
+
+    // ── schema_from_info parity tests ──
+
+    #[test]
+    fn schema_from_info_should_reconstruct_basic_schema() {
+        let mut info = Map::new();
+        info.insert(
+            "index_definition".to_owned(),
+            json!(["key_type", "HASH", "prefixes", ["rvl"]]),
+        );
+        info.insert(
+            "attributes".to_owned(),
+            json!([
+                ["identifier", "$.name", "attribute", "name", "type", "TAG"],
+                ["identifier", "$.age", "attribute", "age", "type", "NUMERIC"],
+            ]),
+        );
+
+        let schema = schema_from_info("test_index", &info).expect("should parse");
+        assert_eq!(schema.index.name, "test_index");
+        assert_eq!(schema.fields.len(), 2);
+        assert_eq!(schema.fields[0].name, "name");
+        assert_eq!(schema.fields[1].name, "age");
+    }
+
+    #[test]
+    fn schema_from_info_should_detect_json_storage() {
+        let mut info = Map::new();
+        info.insert(
+            "index_definition".to_owned(),
+            json!(["key_type", "JSON", "prefixes", ["myprefix"]]),
+        );
+        info.insert("attributes".to_owned(), json!([]));
+
+        let schema = schema_from_info("json_idx", &info).expect("should parse");
+        assert!(matches!(schema.index.storage_type, StorageType::Json));
+    }
+
+    #[test]
+    fn schema_from_info_should_parse_vector_fields() {
+        let mut info = Map::new();
+        info.insert(
+            "index_definition".to_owned(),
+            json!(["key_type", "HASH", "prefixes", ["rvl"]]),
+        );
+        info.insert(
+            "attributes".to_owned(),
+            json!([[
+                "identifier",
+                "embedding",
+                "attribute",
+                "embedding",
+                "type",
+                "VECTOR",
+                "HNSW",
+                "6",
+                "DIM",
+                "768",
+                "DISTANCE_METRIC",
+                "COSINE",
+                "TYPE",
+                "FLOAT32"
+            ]]),
+        );
+
+        let schema = schema_from_info("vec_idx", &info).expect("should parse");
+        assert_eq!(schema.fields.len(), 1);
+        let field = &schema.fields[0];
+        assert_eq!(field.name, "embedding");
+        match &field.kind {
+            crate::schema::FieldKind::Vector { attrs } => {
+                assert_eq!(attrs.dims, 768);
+                assert!(matches!(
+                    attrs.distance_metric,
+                    crate::schema::VectorDistanceMetric::Cosine
+                ));
+                assert!(matches!(
+                    attrs.algorithm,
+                    crate::schema::VectorAlgorithm::Hnsw
+                ));
+            }
+            _ => panic!("expected vector field kind"),
         }
     }
 }

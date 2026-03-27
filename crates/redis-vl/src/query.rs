@@ -1141,26 +1141,248 @@ impl<'a> HybridQuery<'a> {
     }
 }
 
-/// Aggregate-based hybrid query.
+/// Aggregate-based hybrid query that combines text and vector search via
+/// `FT.AGGREGATE`.
+///
+/// Mirrors the Python `AggregateHybridQuery` which scores documents as:
+///
+/// ```text
+/// hybrid_score = alpha * vector_similarity + (1 - alpha) * text_score
+/// ```
+///
+/// where `vector_similarity = (2 - vector_distance) / 2` and
+/// `text_score = @__score` (the scorer output).
 #[derive(Debug, Clone)]
 pub struct AggregateHybridQuery<'a> {
-    inner: HybridQuery<'a>,
+    text: String,
+    text_field_name: String,
+    vector: Vector<'a>,
+    vector_field_name: String,
+    alpha: f32,
+    num_results: usize,
+    text_scorer: String,
+    filter_expression: Option<FilterExpression>,
+    return_fields: Vec<String>,
+    stopwords: Option<std::collections::HashSet<String>>,
+    text_weights: Option<std::collections::HashMap<String, f32>>,
+    dialect: u32,
 }
 
 impl<'a> AggregateHybridQuery<'a> {
-    /// Creates an aggregate hybrid query wrapper.
-    pub fn new(inner: HybridQuery<'a>) -> Self {
-        Self { inner }
+    /// Creates an aggregate hybrid query.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if `text` is empty or becomes empty after stopword
+    /// removal.
+    pub fn new(
+        text: impl Into<String>,
+        text_field_name: impl Into<String>,
+        vector: Vector<'a>,
+        vector_field_name: impl Into<String>,
+    ) -> std::result::Result<Self, String> {
+        let text = text.into();
+        if text.trim().is_empty() {
+            return Err("text string cannot be empty".to_owned());
+        }
+        Ok(Self {
+            text,
+            text_field_name: text_field_name.into(),
+            vector,
+            vector_field_name: vector_field_name.into(),
+            alpha: 0.7,
+            num_results: 10,
+            text_scorer: "BM25STD".to_owned(),
+            filter_expression: None,
+            return_fields: Vec::new(),
+            stopwords: None,
+            text_weights: None,
+            dialect: 2,
+        })
     }
 
-    /// Returns a reference to the inner hybrid query.
-    pub fn inner(&self) -> &HybridQuery<'a> {
-        &self.inner
+    /// Sets the weight of the vector similarity in the hybrid score.
+    pub fn with_alpha(mut self, alpha: f32) -> Self {
+        self.alpha = alpha;
+        self
     }
 
-    /// Returns the inner vector.
+    /// Sets the number of results to return.
+    pub fn with_num_results(mut self, num_results: usize) -> Self {
+        self.num_results = num_results;
+        self
+    }
+
+    /// Sets the text scorer algorithm (e.g. `"BM25STD"`, `"TFIDF"`).
+    pub fn with_text_scorer(mut self, scorer: impl Into<String>) -> Self {
+        self.text_scorer = scorer.into();
+        self
+    }
+
+    /// Attaches a filter expression.
+    pub fn with_filter(mut self, filter_expression: FilterExpression) -> Self {
+        self.filter_expression = Some(filter_expression);
+        self
+    }
+
+    /// Replaces the return field list.
+    pub fn with_return_fields<I, S>(mut self, return_fields: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.return_fields = return_fields.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Sets stopwords to filter from the query text.
+    pub fn with_stopwords(mut self, stopwords: std::collections::HashSet<String>) -> Self {
+        self.stopwords = Some(stopwords);
+        self
+    }
+
+    /// Sets word weights for the text search.
+    pub fn with_text_weights(mut self, weights: std::collections::HashMap<String, f32>) -> Self {
+        self.text_weights = Some(weights);
+        self
+    }
+
+    /// Updates text weights after construction (mirrors Python `set_text_weights`).
+    pub fn set_text_weights(&mut self, weights: std::collections::HashMap<String, f32>) {
+        self.text_weights = Some(weights);
+    }
+
+    /// Sets the Redis dialect version.
+    pub fn with_dialect(mut self, dialect: u32) -> Self {
+        self.dialect = dialect;
+        self
+    }
+
+    /// Returns the encoded query vector.
     pub fn vector(&self) -> &Vector<'a> {
-        self.inner.vector()
+        &self.vector
+    }
+
+    /// Returns the configured alpha value.
+    pub fn alpha(&self) -> f32 {
+        self.alpha
+    }
+
+    /// Returns the query text.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Builds the full-text query string, applying stopwords and weights.
+    pub(crate) fn build_query_string(&self) -> String {
+        let mut text = self.text.clone();
+
+        // Apply stopwords
+        if let Some(stopwords) = &self.stopwords {
+            if !stopwords.is_empty() {
+                let words: Vec<&str> = text.split_whitespace().collect();
+                let filtered: Vec<&str> = words
+                    .into_iter()
+                    .filter(|w| !stopwords.contains(&w.to_lowercase()))
+                    .collect();
+                text = filtered.join(" ");
+            }
+        }
+
+        // Apply word weights
+        if let Some(weights) = &self.text_weights {
+            if !weights.is_empty() {
+                let words: Vec<String> = text
+                    .split_whitespace()
+                    .map(|w| {
+                        if let Some(weight) = weights.get(w) {
+                            format!("{}=>{{{}}}", w, weight)
+                        } else {
+                            w.to_owned()
+                        }
+                    })
+                    .collect();
+                text = words.join(" ");
+            }
+        }
+
+        // Build the base text query with optional filter
+        let base = if let Some(filter) = &self.filter_expression {
+            let filter_str = filter.to_redis_syntax();
+            if filter_str == "*" {
+                format!("@{}:({})", self.text_field_name, text)
+            } else {
+                format!("({}) @{}:({})", filter_str, self.text_field_name, text)
+            }
+        } else {
+            format!("@{}:({})", self.text_field_name, text)
+        };
+
+        // Append KNN vector part
+        format!(
+            "{}=>[KNN {} @{} $vector AS vector_distance]",
+            base, self.num_results, self.vector_field_name,
+        )
+    }
+
+    /// Builds the complete `FT.AGGREGATE` command for this query.
+    pub fn build_aggregate_cmd(&self, index_name: &str) -> redis::Cmd {
+        let query_string = self.build_query_string();
+        let mut cmd = redis::cmd("FT.AGGREGATE");
+        cmd.arg(index_name);
+        cmd.arg(&query_string);
+
+        // SCORER
+        cmd.arg("SCORER").arg(&self.text_scorer);
+
+        // ADDSCORES
+        cmd.arg("ADDSCORES");
+
+        // APPLY: compute vector_similarity and text_score
+        cmd.arg("APPLY")
+            .arg("(2 - @vector_distance)/2")
+            .arg("AS")
+            .arg("vector_similarity");
+        cmd.arg("APPLY").arg("@__score").arg("AS").arg("text_score");
+
+        // APPLY: compute hybrid_score
+        let hybrid_expr = format!(
+            "{}*@text_score + {}*@vector_similarity",
+            1.0 - self.alpha,
+            self.alpha
+        );
+        cmd.arg("APPLY")
+            .arg(&hybrid_expr)
+            .arg("AS")
+            .arg("hybrid_score");
+
+        // SORTBY by hybrid_score DESC
+        cmd.arg("SORTBY")
+            .arg(2)
+            .arg("@hybrid_score")
+            .arg("DESC")
+            .arg("MAX")
+            .arg(self.num_results);
+
+        // LOAD return fields
+        if !self.return_fields.is_empty() {
+            cmd.arg("LOAD");
+            cmd.arg(self.return_fields.len());
+            for field in &self.return_fields {
+                cmd.arg(format!("@{}", field));
+            }
+        }
+
+        // DIALECT
+        cmd.arg("DIALECT").arg(self.dialect);
+
+        // PARAMS for the vector blob
+        cmd.arg("PARAMS")
+            .arg(2)
+            .arg("vector")
+            .arg(self.vector.to_bytes().as_ref());
+
+        cmd
     }
 }
 
@@ -1262,8 +1484,9 @@ impl QueryString for SQLQuery {
 #[cfg(test)]
 mod tests {
     use super::{
-        CountQuery, FilterQuery, HybridCombinationMethod, HybridQuery, PageableQuery, QueryString,
-        SortDirection, TextQuery, Vector, VectorQuery, VectorRangeQuery,
+        AggregateHybridQuery, CountQuery, FilterQuery, HybridCombinationMethod, HybridQuery,
+        PageableQuery, QueryString, SortDirection, TextQuery, Vector, VectorQuery,
+        VectorRangeQuery,
     };
     use crate::filter::{Num, Tag};
 
@@ -1490,5 +1713,145 @@ mod tests {
 
         assert_eq!(render.query_string, "@test:{foo}");
         assert!(render.params.is_empty());
+    }
+
+    #[test]
+    fn aggregate_hybrid_query_should_reject_empty_text() {
+        let result = AggregateHybridQuery::new("", "desc", Vector::new(vec![1.0]), "vec");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn aggregate_hybrid_query_should_build_query_string_like_python_aggregate_hybrid() {
+        let query = AggregateHybridQuery::new(
+            "a medical professional with expertise in lung cancer",
+            "description",
+            Vector::new(vec![0.1, 0.1, 0.5]),
+            "user_embedding",
+        )
+        .unwrap()
+        .with_num_results(10);
+
+        let qs = query.build_query_string();
+        assert!(qs.contains("@description:(a medical professional with expertise in lung cancer)"));
+        assert!(qs.contains("=>[KNN 10 @user_embedding $vector AS vector_distance]"));
+    }
+
+    #[test]
+    fn aggregate_hybrid_query_should_build_ft_aggregate_cmd_like_python() {
+        let query = AggregateHybridQuery::new(
+            "medical professional",
+            "description",
+            Vector::new(vec![0.1, 0.1, 0.5]),
+            "user_embedding",
+        )
+        .unwrap()
+        .with_alpha(0.5)
+        .with_num_results(3)
+        .with_text_scorer("BM25STD")
+        .with_return_fields(["user", "age", "job"]);
+
+        let cmd = query.build_aggregate_cmd("my_index");
+        let packed = cmd.get_packed_command();
+        let cmd_str = String::from_utf8_lossy(&packed);
+
+        assert!(cmd_str.contains("FT.AGGREGATE"));
+        assert!(cmd_str.contains("my_index"));
+        assert!(cmd_str.contains("SCORER"));
+        assert!(cmd_str.contains("BM25STD"));
+        assert!(cmd_str.contains("ADDSCORES"));
+        assert!(cmd_str.contains("vector_similarity"));
+        assert!(cmd_str.contains("text_score"));
+        assert!(cmd_str.contains("hybrid_score"));
+        assert!(cmd_str.contains("SORTBY"));
+        assert!(cmd_str.contains("LOAD"));
+        assert!(cmd_str.contains("DIALECT"));
+        assert!(cmd_str.contains("PARAMS"));
+    }
+
+    #[test]
+    fn aggregate_hybrid_query_with_filter_like_python_aggregate_filter() {
+        let filter = Tag::new("credit_score").eq("high") & Num::new("age").gt(30.0);
+        let query = AggregateHybridQuery::new(
+            "medical professional",
+            "description",
+            Vector::new(vec![0.1, 0.1, 0.5]),
+            "user_embedding",
+        )
+        .unwrap()
+        .with_filter(filter);
+
+        let qs = query.build_query_string();
+        assert!(qs.contains("@credit_score:{high}"));
+        assert!(qs.contains("@age:[(30"));
+    }
+
+    #[test]
+    fn aggregate_hybrid_query_with_stopwords_like_python_aggregate_stopwords() {
+        use std::collections::HashSet;
+        let mut stopwords = HashSet::new();
+        stopwords.insert("medical".to_owned());
+        stopwords.insert("expertise".to_owned());
+
+        let query = AggregateHybridQuery::new(
+            "a medical professional with expertise in lung cancer",
+            "description",
+            Vector::new(vec![0.1, 0.1, 0.5]),
+            "user_embedding",
+        )
+        .unwrap()
+        .with_stopwords(stopwords);
+
+        let qs = query.build_query_string();
+        assert!(!qs.contains("medical"));
+        assert!(!qs.contains("expertise"));
+    }
+
+    #[test]
+    fn aggregate_hybrid_query_with_text_weights_like_python_aggregate_word_weights() {
+        use std::collections::HashMap;
+        let mut weights = HashMap::new();
+        weights.insert("medical".to_owned(), 3.4_f32);
+        weights.insert("cancers".to_owned(), 5.0_f32);
+
+        let query = AggregateHybridQuery::new(
+            "a medical professional with expertise in lung cancers",
+            "description",
+            Vector::new(vec![0.1, 0.1, 0.5]),
+            "user_embedding",
+        )
+        .unwrap()
+        .with_text_weights(weights);
+
+        let qs = query.build_query_string();
+        assert!(qs.contains("medical=>{3.4}"));
+        assert!(qs.contains("cancers=>{5}"));
+    }
+
+    #[test]
+    fn aggregate_hybrid_query_set_text_weights_should_match_constructor_weights() {
+        use std::collections::HashMap;
+        let mut weights = HashMap::new();
+        weights.insert("medical".to_owned(), 5.0_f32);
+
+        let query1 = AggregateHybridQuery::new(
+            "a medical professional",
+            "description",
+            Vector::new(vec![0.1, 0.1, 0.5]),
+            "user_embedding",
+        )
+        .unwrap()
+        .with_text_weights(weights.clone());
+
+        let mut query2 = AggregateHybridQuery::new(
+            "a medical professional",
+            "description",
+            Vector::new(vec![0.1, 0.1, 0.5]),
+            "user_embedding",
+        )
+        .unwrap();
+        query2.set_text_weights(weights);
+
+        assert_eq!(query1.build_query_string(), query2.build_query_string());
     }
 }
