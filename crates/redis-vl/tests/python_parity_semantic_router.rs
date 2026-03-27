@@ -194,7 +194,6 @@ fn python_test_router_clear_and_to_json_value() {
     router.delete().expect("delete should succeed");
 }
 
-
 #[test]
 fn python_test_router_add_route_references() {
     let Some(mut router) = create_router() else {
@@ -244,17 +243,27 @@ fn python_test_router_get_route_references() {
         .expect("get_route_references should succeed");
 
     // Should find 2 references for "greeting"
-    assert_eq!(refs.len(), 2, "expected 2 greeting references, got {:?}", refs);
+    assert_eq!(
+        refs.len(),
+        2,
+        "expected 2 greeting references, got {:?}",
+        refs
+    );
 
     // Each reference should have the expected fields
     for r in &refs {
-        assert!(r.contains_key("reference_id"), "missing reference_id: {:?}", r);
+        assert!(
+            r.contains_key("reference_id"),
+            "missing reference_id: {:?}",
+            r
+        );
         assert!(r.contains_key("route_name"), "missing route_name: {:?}", r);
         assert!(r.contains_key("reference"), "missing reference: {:?}", r);
         assert_eq!(
             r.get("route_name").and_then(|v| v.as_str()),
             Some("greeting"),
-            "unexpected route_name: {:?}", r
+            "unexpected route_name: {:?}",
+            r
         );
     }
 
@@ -281,10 +290,13 @@ fn python_test_router_delete_route_references_by_route_name() {
     assert_eq!(deleted, 2, "expected 2 deleted, got {deleted}");
 
     // In-memory route should have 0 references
-    let greeting = router.get("greeting").expect("greeting route should still exist");
+    let greeting = router
+        .get("greeting")
+        .expect("greeting route should still exist");
     assert!(
         greeting.references.is_empty(),
-        "expected empty references, got {:?}", greeting.references
+        "expected empty references, got {:?}",
+        greeting.references
     );
 
     // Must provide at least one parameter
@@ -329,178 +341,6 @@ fn python_test_router_delete_route_references_by_keys() {
     // In-memory route should have 0 references
     let farewell = router.get("farewell").expect("farewell route should exist");
     assert!(farewell.references.is_empty());
-
-    router.delete().expect("delete should succeed");
-}
-
-#[test]
-fn python_test_add_route_references() {
-    let Some(mut router) = create_router() else {
-        return;
-    };
-
-    // Add new references to an existing route
-    let new_refs = vec!["hey there".to_owned(), "howdy".to_owned()];
-    let keys = router
-        .add_route_references("greeting", &new_refs)
-        .expect("add_route_references should succeed");
-
-    // Should return one key per reference
-    assert_eq!(keys.len(), 2);
-
-    // In-memory route should be updated
-    let greeting = router.get("greeting").expect("greeting route should exist");
-    assert!(greeting.references.contains(&"hey there".to_owned()));
-    assert!(greeting.references.contains(&"howdy".to_owned()));
-    assert_eq!(greeting.references.len(), 4); // 2 original + 2 new
-
-    // Adding to a non-existent route should error
-    let result = router.add_route_references("nonexistent", &["test".to_owned()]);
-    assert!(result.is_err());
-
-    router.delete().expect("delete should succeed");
-}
-
-#[test]
-fn python_test_get_route_references() {
-    let Some(router) = create_router() else {
-        return;
-    };
-
-    // Give Redis a moment to index
-    std::thread::sleep(std::time::Duration::from_millis(500));
-
-    // Get references by route name
-    let refs = router
-        .get_route_references(Some("greeting"), None)
-        .expect("get_route_references should succeed");
-
-    // Should find the 2 greeting references
-    assert_eq!(refs.len(), 2);
-    for r in &refs {
-        assert_eq!(
-            r.get("route_name").and_then(|v| v.as_str()),
-            Some("greeting")
-        );
-        assert!(r.get("reference").is_some());
-        assert!(r.get("reference_id").is_some());
-    }
-
-    // Calling with neither name nor IDs should error
-    let result = router.get_route_references(None, None);
-    assert!(result.is_err());
-
-    router.delete().expect("delete should succeed");
-}
-
-#[test]
-fn python_test_delete_route_references_by_route_name() {
-    let Some(mut router) = create_router() else {
-        return;
-    };
-
-    // Give Redis a moment to index
-    std::thread::sleep(std::time::Duration::from_millis(500));
-
-    // Delete all references for a route by name
-    let deleted = router
-        .delete_route_references(Some("greeting"), None, None)
-        .expect("delete_route_references should succeed");
-
-    assert!(deleted >= 1);
-
-    // In-memory route should have no references left
-    let greeting = router.get("greeting").expect("greeting route should exist");
-    assert!(greeting.references.is_empty());
-
-    // Calling with no arguments should error
-    let result = router.delete_route_references(None, None, None);
-    assert!(result.is_err());
-
-    router.delete().expect("delete should succeed");
-}
-
-
-#[test]
-fn python_test_router_add_route_references() {
-    let Some(mut router) = create_router() else {
-        return;
-    };
-
-    // Add new references to the existing "greeting" route
-    let new_refs = vec!["hey there".to_owned(), "howdy".to_owned()];
-    let keys = router
-        .add_route_references("greeting", &new_refs)
-        .expect("add_route_references should succeed");
-
-    // Should return 2 keys, one per added reference
-    assert_eq!(keys.len(), 2);
-
-    // In-memory route should reflect the added references
-    let route = router.get("greeting").expect("greeting route should exist");
-    assert!(route.references.contains(&"hey there".to_owned()));
-    assert!(route.references.contains(&"howdy".to_owned()));
-    assert_eq!(route.references.len(), 4); // original 2 + new 2
-
-    // Adding to a non-existent route should fail
-    let result = router.add_route_references("non_existent", &["test".to_owned()]);
-    assert!(result.is_err());
-
-    router.delete().expect("delete should succeed");
-}
-
-#[test]
-fn python_test_router_get_route_references() {
-    let Some(router) = create_router() else {
-        return;
-    };
-
-    // Allow the index to settle
-    std::thread::sleep(std::time::Duration::from_millis(500));
-
-    // Get references by route name
-    let refs = router
-        .get_route_references(Some("greeting"), None)
-        .expect("get_route_references should succeed");
-
-    // The greeting route has 2 references ("hello", "hi")
-    assert_eq!(refs.len(), 2);
-    for r in &refs {
-        assert_eq!(
-            r.get("route_name").and_then(|v| v.as_str()),
-            Some("greeting")
-        );
-        let ref_text = r.get("reference").and_then(|v| v.as_str()).unwrap();
-        assert!(ref_text == "hello" || ref_text == "hi");
-    }
-
-    // Must provide at least one of route_name or reference_ids
-    let err = router.get_route_references(None, None);
-    assert!(err.is_err());
-
-    router.delete().expect("delete should succeed");
-}
-
-#[test]
-fn python_test_router_delete_route_references_by_route_name() {
-    let Some(mut router) = create_router() else {
-        return;
-    };
-
-    // Delete all references for "farewell"
-    let deleted = router
-        .delete_route_references(Some("farewell"), None, None)
-        .expect("delete_route_references should succeed");
-
-    assert!(deleted >= 1);
-
-    // In-memory route should have no references
-    let route = router.get("farewell").expect("farewell route should exist");
-    assert!(route.references.is_empty());
-
-    // Must provide at least one filter
-    let err = router.delete_route_references(None, None, None);
-    assert!(err.is_err());
 
     router.delete().expect("delete should succeed");
 }
