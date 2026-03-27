@@ -187,6 +187,18 @@ impl SemanticRouter {
         let schema = router_schema(&name, probe_vector.len(), dtype);
         let index = SearchIndex::from_json_value(schema, connection.redis_url.clone())?;
         let existed = index.exists().unwrap_or(false);
+
+        // Validate schema compatibility with existing index (mirrors Python behavior)
+        if !overwrite && existed {
+            let existing_index = SearchIndex::from_existing(&name, connection.redis_url.clone())?;
+            if existing_index.schema().to_json_value()? != index.schema().to_json_value()? {
+                return Err(Error::InvalidInput(format!(
+                    "Existing index {name} schema does not match the user provided schema for the semantic router. \
+                     If you wish to overwrite the index schema, set overwrite=true during initialization."
+                )));
+            }
+        }
+
         index.create_with_options(overwrite, false)?;
 
         let router = Self {
@@ -419,6 +431,7 @@ impl SemanticRouter {
             .collect::<Vec<_>>();
         self.index.drop_keys(&keys)?;
         self.routes.retain(|route| route.name != route_name);
+        self.persist_config()?;
         Ok(())
     }
 

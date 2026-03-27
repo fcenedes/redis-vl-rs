@@ -642,3 +642,96 @@ fn python_test_router_persist_after_add_references() {
 
     router.delete().expect("delete should succeed");
 }
+
+/// Mirrors Python `test_bad_dtype_connecting_to_existing_router`.
+///
+/// Creating a router with one dtype and then connecting to it with a
+/// different dtype (overwrite=false) should error.
+#[test]
+fn python_test_bad_dtype_connecting_to_existing_router() {
+    if !integration_enabled() {
+        return;
+    }
+
+    let name = format!("test_bad_dtype_{}", COUNTER.fetch_add(1, Ordering::Relaxed));
+
+    // Create a router with float32 dtype.
+    let _router = SemanticRouter::new_with_options(
+        name.clone(),
+        redis_url(),
+        routes(),
+        RoutingConfig::default(),
+        CustomTextVectorizer::new(|text| Ok(embed_text(text))),
+        redis_vl::schema::VectorDataType::Float32,
+        false,
+    )
+    .expect("initial creation should succeed");
+
+    // Attempt to connect with float64 dtype — should fail.
+    let result = SemanticRouter::new_with_options(
+        name.clone(),
+        redis_url(),
+        routes(),
+        RoutingConfig::default(),
+        CustomTextVectorizer::new(|text| Ok(embed_text(text))),
+        redis_vl::schema::VectorDataType::Float64,
+        false,
+    );
+
+    assert!(
+        result.is_err(),
+        "connecting with mismatched dtype should fail"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("schema does not match"),
+        "error should mention schema mismatch, got: {err_msg}"
+    );
+
+    // Clean up — delete via a properly-typed router.
+    _router.delete().expect("cleanup should succeed");
+}
+
+/// Creating a router twice with the same dtype and overwrite=false should succeed
+/// (idempotent reconnect).
+#[test]
+fn python_test_same_dtype_reconnect_succeeds() {
+    if !integration_enabled() {
+        return;
+    }
+
+    let name = format!(
+        "test_same_dtype_{}",
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+
+    let router1 = SemanticRouter::new_with_options(
+        name.clone(),
+        redis_url(),
+        routes(),
+        RoutingConfig::default(),
+        CustomTextVectorizer::new(|text| Ok(embed_text(text))),
+        redis_vl::schema::VectorDataType::Float32,
+        false,
+    )
+    .expect("initial creation should succeed");
+
+    // Reconnect with same dtype — should succeed.
+    let router2 = SemanticRouter::new_with_options(
+        name.clone(),
+        redis_url(),
+        routes(),
+        RoutingConfig::default(),
+        CustomTextVectorizer::new(|text| Ok(embed_text(text))),
+        redis_vl::schema::VectorDataType::Float32,
+        false,
+    );
+
+    assert!(
+        router2.is_ok(),
+        "reconnect with same dtype should succeed: {:?}",
+        router2.err()
+    );
+
+    router1.delete().expect("cleanup should succeed");
+}

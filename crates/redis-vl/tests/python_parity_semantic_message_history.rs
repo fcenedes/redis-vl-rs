@@ -348,3 +348,97 @@ fn python_test_semantic_history_overwrite() {
 
     history2.delete().expect("delete should succeed");
 }
+
+/// Mirrors Python dtype-mismatch on reconnect behavior.
+///
+/// Creating a semantic history with one dtype and reconnecting with
+/// a different one (overwrite=false) should return an error.
+#[test]
+fn python_test_bad_dtype_connecting_to_existing_semantic_history() {
+    if !integration_enabled() {
+        return;
+    }
+
+    let name = format!(
+        "test_bad_dtype_smh_{}",
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+
+    // Create with float32.
+    let _history = SemanticMessageHistory::new_with_options(
+        name.clone(),
+        redis_url(),
+        0.3,
+        VECTOR_DIMENSIONS,
+        CustomTextVectorizer::new(|text| Ok(embed_text(text))),
+        redis_vl::schema::VectorDataType::Float32,
+        false,
+    )
+    .expect("initial creation should succeed");
+
+    // Attempt to reconnect with float64 — should fail.
+    let result = SemanticMessageHistory::new_with_options(
+        name.clone(),
+        redis_url(),
+        0.3,
+        VECTOR_DIMENSIONS,
+        CustomTextVectorizer::new(|text| Ok(embed_text(text))),
+        redis_vl::schema::VectorDataType::Float64,
+        false,
+    );
+
+    assert!(
+        result.is_err(),
+        "connecting with mismatched dtype should fail"
+    );
+    let err_msg = result.unwrap_err().to_string();
+    assert!(
+        err_msg.contains("schema does not match"),
+        "error should mention schema mismatch, got: {err_msg}"
+    );
+
+    _history.delete().expect("cleanup should succeed");
+}
+
+/// Reconnecting with the same dtype should succeed.
+#[test]
+fn python_test_same_dtype_reconnect_semantic_history_succeeds() {
+    if !integration_enabled() {
+        return;
+    }
+
+    let name = format!(
+        "test_same_dtype_smh_{}",
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+
+    let history1 = SemanticMessageHistory::new_with_options(
+        name.clone(),
+        redis_url(),
+        0.3,
+        VECTOR_DIMENSIONS,
+        CustomTextVectorizer::new(|text| Ok(embed_text(text))),
+        redis_vl::schema::VectorDataType::Float32,
+        false,
+    )
+    .expect("initial creation should succeed");
+
+    // Reconnect with same dtype — should succeed.
+    let result = SemanticMessageHistory::new_with_options(
+        name.clone(),
+        redis_url(),
+        0.3,
+        VECTOR_DIMENSIONS,
+        CustomTextVectorizer::new(|text| Ok(embed_text(text))),
+        redis_vl::schema::VectorDataType::Float32,
+        false,
+    );
+
+    assert!(
+        result.is_ok(),
+        "reconnect with same dtype should succeed: {:?}",
+        result.err()
+    );
+
+    history1.delete().expect("cleanup should succeed");
+}

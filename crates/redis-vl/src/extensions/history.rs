@@ -473,8 +473,20 @@ impl SemanticMessageHistory {
         let history = MessageHistory::new(name.clone(), redis_url.clone());
         let index = SearchIndex::from_json_value(
             semantic_message_history_schema(&name, vector_dimensions, dtype),
-            redis_url,
+            redis_url.clone(),
         )?;
+
+        // Validate schema compatibility with existing index (mirrors Python behavior)
+        if !overwrite && index.exists().unwrap_or(false) {
+            let existing_index = SearchIndex::from_existing(&name, redis_url)?;
+            if existing_index.schema().to_json_value()? != index.schema().to_json_value()? {
+                return Err(Error::InvalidInput(format!(
+                    "Existing index {name} schema does not match the user provided schema for the semantic message history. \
+                     If you wish to overwrite the index schema, set overwrite=true during initialization."
+                )));
+            }
+        }
+
         index.create_with_options(overwrite, false)?;
 
         Ok(Self {
