@@ -121,15 +121,18 @@ Latest verified commands:
 
 Current passing Rust test inventory:
 
-- 38 unit tests in `crates/redis-vl/src/*`
+- 180 unit tests in `crates/redis-vl/src/*`
 - 16 sync search-index/query parity integration tests
 - 6 async search-index/query parity integration tests
+- 11 multi-prefix parity integration tests
 - 8 embeddings-cache parity integration tests
 - 5 semantic-cache parity integration tests
 - 4 standard message-history parity integration tests
 - 3 role-filter parity integration tests
-- 4 semantic-message-history parity integration tests
-- 4 semantic-router parity integration tests
+- 5 semantic-message-history parity integration tests
+- 16 semantic-router parity integration tests
+- 5 CLI smoke tests
+- 4 doctests
 
 Integration test execution notes:
 
