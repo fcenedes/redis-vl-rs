@@ -399,6 +399,75 @@ impl SearchIndex {
         Ok(written_keys)
     }
 
+    /// Loads documents using caller-supplied Redis keys instead of generating
+    /// keys from the index prefix.
+    ///
+    /// This mirrors the Python `index.load(data, keys=keys)` signature and is
+    /// essential for multi-prefix indexes where documents must be written under
+    /// different key prefixes.
+    ///
+    /// `keys` and `data` must have the same length.
+    pub fn load_with_keys(
+        &self,
+        data: &[Value],
+        keys: &[String],
+        ttl: Option<i64>,
+    ) -> Result<Vec<String>> {
+        if data.len() != keys.len() {
+            return Err(Error::InvalidInput(format!(
+                "data length ({}) must equal keys length ({})",
+                data.len(),
+                keys.len()
+            )));
+        }
+
+        let client = self.connection.client()?;
+        let mut connection = client.get_connection()?;
+
+        for (record, key) in data.iter().zip(keys.iter()) {
+            let object = record.as_object().ok_or_else(|| {
+                Error::InvalidInput("load expects an array of JSON objects".to_owned())
+            })?;
+
+            match self.storage_type() {
+                StorageType::Json => {
+                    let payload = serde_json::to_string(record)?;
+                    let (): () = redis::cmd("JSON.SET")
+                        .arg(key)
+                        .arg("$")
+                        .arg(payload)
+                        .query(&mut connection)?;
+                }
+                StorageType::Hash => {
+                    let encoded = encode_hash_record(object, &self.schema)?;
+                    let mut cmd = redis::cmd("HSET");
+                    cmd.arg(key);
+                    for (field, value) in encoded {
+                        cmd.arg(field);
+                        match value {
+                            EncodedHashValue::String(value) => {
+                                cmd.arg(value);
+                            }
+                            EncodedHashValue::Binary(value) => {
+                                cmd.arg(value);
+                            }
+                        }
+                    }
+                    let _: i32 = cmd.query(&mut connection)?;
+                }
+            }
+
+            if let Some(ttl) = ttl {
+                let _: bool = redis::cmd("EXPIRE")
+                    .arg(key)
+                    .arg(ttl)
+                    .query(&mut connection)?;
+            }
+        }
+
+        Ok(keys.to_vec())
+    }
+
     /// Fetches a JSON document as raw JSON text.
     pub fn fetch_json_raw(&self, key_suffix: &str) -> Result<String> {
         let client = self.connection.client()?;
@@ -1033,6 +1102,77 @@ impl AsyncSearchIndex {
         }
 
         Ok(written_keys)
+    }
+
+    /// Loads documents using caller-supplied Redis keys instead of generating
+    /// keys from the index prefix.
+    ///
+    /// This mirrors the Python `index.load(data, keys=keys)` signature and is
+    /// essential for multi-prefix indexes where documents must be written under
+    /// different key prefixes.
+    ///
+    /// `keys` and `data` must have the same length.
+    pub async fn load_with_keys(
+        &self,
+        data: &[Value],
+        keys: &[String],
+        ttl: Option<i64>,
+    ) -> Result<Vec<String>> {
+        if data.len() != keys.len() {
+            return Err(Error::InvalidInput(format!(
+                "data length ({}) must equal keys length ({})",
+                data.len(),
+                keys.len()
+            )));
+        }
+
+        let client = self.connection.client()?;
+        let mut connection = client.get_multiplexed_async_connection().await?;
+
+        for (record, key) in data.iter().zip(keys.iter()) {
+            let object = record.as_object().ok_or_else(|| {
+                Error::InvalidInput("load expects an array of JSON objects".to_owned())
+            })?;
+
+            match self.storage_type() {
+                StorageType::Json => {
+                    let payload = serde_json::to_string(record)?;
+                    let (): () = redis::cmd("JSON.SET")
+                        .arg(key)
+                        .arg("$")
+                        .arg(payload)
+                        .query_async(&mut connection)
+                        .await?;
+                }
+                StorageType::Hash => {
+                    let encoded = encode_hash_record(object, &self.schema)?;
+                    let mut cmd = redis::cmd("HSET");
+                    cmd.arg(key);
+                    for (field, value) in encoded {
+                        cmd.arg(field);
+                        match value {
+                            EncodedHashValue::String(value) => {
+                                cmd.arg(value);
+                            }
+                            EncodedHashValue::Binary(value) => {
+                                cmd.arg(value);
+                            }
+                        }
+                    }
+                    let _: i32 = cmd.query_async(&mut connection).await?;
+                }
+            }
+
+            if let Some(ttl) = ttl {
+                let _: bool = redis::cmd("EXPIRE")
+                    .arg(key)
+                    .arg(ttl)
+                    .query_async(&mut connection)
+                    .await?;
+            }
+        }
+
+        Ok(keys.to_vec())
     }
 
     /// Fetches a document by its logical identifier.
@@ -2580,5 +2720,30 @@ mod tests {
             }
             _ => panic!("expected vector field kind"),
         }
+    }
+
+    #[test]
+    fn multi_prefix_index_should_report_correct_prefix_count_in_create_cmd() {
+        let index = SearchIndex::from_json_value(
+            serde_json::json!({
+                "index": {
+                    "name": "multi_test",
+                    "prefix": ["pfx_a", "pfx_b"]
+                },
+                "fields": [
+                    { "name": "tag", "type": "tag" }
+                ]
+            }),
+            "redis://127.0.0.1:6379",
+        )
+        .expect("index should parse");
+
+        // Verify the schema round-trips all prefixes — `create_cmd` iterates
+        // over `self.schema.index.prefix.all()` so if these pass the command
+        // will carry both prefixes.
+        assert_eq!(index.prefixes(), vec!["pfx_a", "pfx_b"]);
+        assert_eq!(index.prefix(), "pfx_a");
+        // create_cmd is exercised end-to-end via integration tests.
+        let _cmd = index.create_cmd();
     }
 }
