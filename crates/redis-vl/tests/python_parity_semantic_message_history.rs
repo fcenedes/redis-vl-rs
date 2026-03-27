@@ -301,3 +301,45 @@ fn python_test_semantic_drop_and_count() {
 
     history.delete().expect("delete should succeed");
 }
+
+/// Tests that `new_with_options(overwrite=true)` drops and recreates the index.
+#[test]
+fn python_test_semantic_history_overwrite() {
+    if !integration_enabled() {
+        return;
+    }
+
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let name = format!("python_parity_semhist_overwrite_{id}");
+    let url = redis_url();
+
+    let history = SemanticMessageHistory::new_with_options(
+        name.clone(),
+        url.clone(),
+        0.5,
+        VECTOR_DIMENSIONS,
+        CustomTextVectorizer::new(|text| Ok(embed_text(text))),
+        false,
+    )
+    .expect("first create should succeed");
+
+    history
+        .store("user", "hello world", None, None)
+        .expect("store should succeed");
+    assert_eq!(history.count(None).expect("count"), 1);
+
+    // Recreate with overwrite = true → should start fresh
+    let history2 = SemanticMessageHistory::new_with_options(
+        name.clone(),
+        url.clone(),
+        0.5,
+        VECTOR_DIMENSIONS,
+        CustomTextVectorizer::new(|text| Ok(embed_text(text))),
+        true,
+    )
+    .expect("overwrite create should succeed");
+
+    assert_eq!(history2.count(None).expect("count"), 0);
+
+    history2.delete().expect("delete should succeed");
+}

@@ -1,12 +1,12 @@
 //! Semantic router extension types.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, path::Path, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::{
-    error::Result,
+    error::{Error, Result},
     index::{QueryOutput, RedisConnectionInfo, SearchIndex},
     query::{Vector, VectorRangeQuery},
     vectorizers::Vectorizer,
@@ -117,6 +117,10 @@ pub struct SemanticRouter {
 
 impl SemanticRouter {
     /// Creates a new semantic router and loads the provided routes into Redis.
+    ///
+    /// If `overwrite` is false and an index with the same name already exists,
+    /// the existing index is reused without re-loading routes.  When `overwrite`
+    /// is true the index is dropped and recreated.
     pub fn new<V>(
         name: impl Into<String>,
         redis_url: impl Into<String>,
@@ -127,8 +131,23 @@ impl SemanticRouter {
     where
         V: Vectorizer + 'static,
     {
+        Self::new_with_options(name, redis_url, routes, routing_config, vectorizer, false)
+    }
+
+    /// Creates a new semantic router with explicit overwrite control.
+    pub fn new_with_options<V>(
+        name: impl Into<String>,
+        redis_url: impl Into<String>,
+        routes: Vec<Route>,
+        routing_config: RoutingConfig,
+        vectorizer: V,
+        overwrite: bool,
+    ) -> Result<Self>
+    where
+        V: Vectorizer + 'static,
+    {
         if routes.is_empty() {
-            return Err(crate::Error::InvalidInput(
+            return Err(Error::InvalidInput(
                 "semantic router requires at least one route".to_owned(),
             ));
         }
@@ -139,7 +158,7 @@ impl SemanticRouter {
             .next()
             .cloned()
         else {
-            return Err(crate::Error::InvalidInput(
+            return Err(Error::InvalidInput(
                 "semantic router routes require at least one reference".to_owned(),
             ));
         };
@@ -147,7 +166,7 @@ impl SemanticRouter {
         let vectorizer = Arc::new(vectorizer);
         let probe_vector = vectorizer.embed(&first_reference)?;
         if probe_vector.is_empty() {
-            return Err(crate::Error::InvalidInput(
+            return Err(Error::InvalidInput(
                 "router vectorizer produced an empty embedding".to_owned(),
             ));
         }
@@ -156,9 +175,8 @@ impl SemanticRouter {
         let connection = RedisConnectionInfo::new(redis_url);
         let schema = router_schema(&name, probe_vector.len());
         let index = SearchIndex::from_json_value(schema, connection.redis_url.clone())?;
-        if !index.exists().unwrap_or(false) {
-            index.create_with_options(false, false)?;
-        }
+        let existed = index.exists().unwrap_or(false);
+        index.create_with_options(overwrite, false)?;
 
         let router = Self {
             name,
@@ -169,8 +187,87 @@ impl SemanticRouter {
             vectorizer,
             vector_dimensions: probe_vector.len(),
         };
-        router.load_routes()?;
+
+        if !existed || overwrite {
+            router.load_routes()?;
+        }
+        router.persist_config()?;
         Ok(router)
+    }
+
+    /// Reconnects to an existing semantic router stored in Redis.
+    ///
+    /// The router configuration (name, routes, routing config) must have been
+    /// previously persisted by a [`SemanticRouter::new`] call.  The vectorizer
+    /// must be supplied by the caller since vectorizers cannot be serialized.
+    pub fn from_existing<V>(
+        name: impl Into<String>,
+        redis_url: impl Into<String>,
+        vectorizer: V,
+    ) -> Result<Self>
+    where
+        V: Vectorizer + 'static,
+    {
+        let name = name.into();
+        let connection = RedisConnectionInfo::new(redis_url);
+        let config_key = router_config_key(&name);
+
+        let client = connection.client()?;
+        let mut conn = client.get_connection()?;
+
+        // Read persisted config
+        let raw: Option<String> = redis::cmd("JSON.GET")
+            .arg(&config_key)
+            .arg(".")
+            .query(&mut conn)?;
+        let raw = raw.ok_or_else(|| {
+            Error::InvalidInput(format!(
+                "No valid router config found for {name}. No persisted configuration exists at key '{config_key}'."
+            ))
+        })?;
+        let config_value: Value = serde_json::from_str(&raw)?;
+        let config_obj = config_value
+            .as_object()
+            .ok_or_else(|| Error::InvalidInput("Router config is not an object".to_owned()))?;
+
+        let routes_value = config_obj
+            .get("routes")
+            .ok_or_else(|| Error::InvalidInput("Router config missing 'routes'".to_owned()))?;
+        let routes: Vec<Route> = serde_json::from_value(routes_value.clone())?;
+        let routing_config_value = config_obj.get("routing_config").ok_or_else(|| {
+            Error::InvalidInput("Router config missing 'routing_config'".to_owned())
+        })?;
+        let routing_config: RoutingConfig = serde_json::from_value(routing_config_value.clone())?;
+
+        let vectorizer = Arc::new(vectorizer);
+
+        // Probe dimensions from the first route reference
+        let first_ref = routes
+            .iter()
+            .flat_map(|r| r.references.iter())
+            .next()
+            .ok_or_else(|| Error::InvalidInput("Persisted routes have no references".to_owned()))?;
+        let probe = vectorizer.embed(first_ref)?;
+        let vector_dimensions = probe.len();
+
+        let schema = router_schema(&name, vector_dimensions);
+        let index = SearchIndex::from_json_value(schema, connection.redis_url.clone())?;
+        // The index should already exist
+        if !index.exists().unwrap_or(false) {
+            return Err(Error::InvalidInput(format!(
+                "Index '{name}' does not exist in Redis"
+            )));
+        }
+
+        Ok(Self {
+            name,
+            connection,
+            routes,
+            routing_config,
+            index,
+            vectorizer,
+            vector_dimensions,
+        })
     }
 
     /// Returns the names of the configured routes.
@@ -315,8 +412,13 @@ impl SemanticRouter {
         Ok(deleted)
     }
 
-    /// Deletes the router index and its documents.
+    /// Deletes the router index, its documents, and the persisted config key.
     pub fn delete(&self) -> Result<()> {
+        // Remove persisted config
+        let config_key = router_config_key(&self.name);
+        let client = self.connection.client()?;
+        let mut conn = client.get_connection()?;
+        let _: usize = redis::cmd("DEL").arg(&config_key).query(&mut conn)?;
         self.index.delete(true)
     }
 
@@ -370,6 +472,7 @@ impl SemanticRouter {
         if let Some(route) = self.routes.iter_mut().find(|r| r.name == route_name) {
             route.references.extend(references.iter().cloned());
         }
+        self.persist_config()?;
 
         Ok(keys)
     }
@@ -511,10 +614,15 @@ impl SemanticRouter {
         }
 
         let deleted = self.index.drop_keys(&keys_to_delete)?;
+        self.persist_config()?;
         Ok(deleted)
     }
 
-    /// Serializes the router to a JSON value.
+    /// Serializes the router to a JSON value (equivalent to Python `to_dict()`).
+    ///
+    /// The `vectorizer` field contains a `{"type": "custom"}` marker since
+    /// Rust vectorizer implementations cannot be serialized.  Use this for
+    /// round-tripping via [`from_dict`].
     pub fn to_json_value(&self) -> Result<Value> {
         Ok(json!({
             "name": self.name,
@@ -524,6 +632,123 @@ impl SemanticRouter {
                 "type": "custom"
             }
         }))
+    }
+
+    /// Alias for [`to_json_value`] matching the Python `to_dict()` name.
+    pub fn to_dict(&self) -> Result<Value> {
+        self.to_json_value()
+    }
+
+    /// Writes the router configuration to a YAML file.
+    ///
+    /// If `overwrite` is false and the file already exists, returns an error.
+    pub fn to_yaml(&self, file_path: impl AsRef<Path>, overwrite: bool) -> Result<()> {
+        let path = file_path.as_ref();
+        if path.exists() && !overwrite {
+            return Err(Error::InvalidInput(format!(
+                "Schema file {} already exists.",
+                path.display()
+            )));
+        }
+        let dict = self.to_json_value()?;
+        let file = std::fs::File::create(path)
+            .map_err(|e| Error::InvalidInput(format!("Cannot create file: {e}")))?;
+        serde_yaml::to_writer(file, &dict)
+            .map_err(|e| Error::InvalidInput(format!("YAML serialization error: {e}")))?;
+        Ok(())
+    }
+
+    /// Creates a semantic router from a YAML file.
+    ///
+    /// The caller must supply a vectorizer since vectorizer implementations
+    /// cannot be deserialized from YAML.
+    pub fn from_yaml<V>(
+        file_path: impl AsRef<Path>,
+        redis_url: impl Into<String>,
+        vectorizer: V,
+        overwrite: bool,
+    ) -> Result<Self>
+    where
+        V: Vectorizer + 'static,
+    {
+        let path = file_path.as_ref();
+        if !path.exists() {
+            return Err(Error::InvalidInput(format!(
+                "File {} does not exist",
+                path.display()
+            )));
+        }
+        let file = std::fs::File::open(path)
+            .map_err(|e| Error::InvalidInput(format!("Cannot open file: {e}")))?;
+        let dict: Value = serde_yaml::from_reader(file)
+            .map_err(|e| Error::InvalidInput(format!("YAML deserialization error: {e}")))?;
+        Self::from_dict(dict, redis_url, vectorizer, overwrite)
+    }
+
+    /// Creates a semantic router from a previously serialized JSON value.
+    ///
+    /// The caller must supply a vectorizer since vectorizer implementations
+    /// cannot be deserialized from JSON.
+    pub fn from_dict<V>(
+        data: Value,
+        redis_url: impl Into<String>,
+        vectorizer: V,
+        overwrite: bool,
+    ) -> Result<Self>
+    where
+        V: Vectorizer + 'static,
+    {
+        let obj = data
+            .as_object()
+            .ok_or_else(|| Error::InvalidInput("Router dict must be a JSON object".to_owned()))?;
+
+        let name = obj
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or_else(|| {
+                Error::InvalidInput(
+                    "Unable to load semantic router from dict: missing 'name'".to_owned(),
+                )
+            })?
+            .to_owned();
+
+        let routes_value = obj.get("routes").ok_or_else(|| {
+            Error::InvalidInput(
+                "Unable to load semantic router from dict: missing 'routes'".to_owned(),
+            )
+        })?;
+        let routes: Vec<Route> = serde_json::from_value(routes_value.clone())?;
+
+        let routing_config_value = obj.get("routing_config").ok_or_else(|| {
+            Error::InvalidInput(
+                "Unable to load semantic router from dict: missing 'routing_config'".to_owned(),
+            )
+        })?;
+        let routing_config: RoutingConfig = serde_json::from_value(routing_config_value.clone())?;
+
+        Self::new_with_options(
+            name,
+            redis_url,
+            routes,
+            routing_config,
+            vectorizer,
+            overwrite,
+        )
+    }
+
+    /// Persists the current router configuration to Redis as a JSON document.
+    fn persist_config(&self) -> Result<()> {
+        let config_key = router_config_key(&self.name);
+        let dict = self.to_json_value()?;
+        let json_str = serde_json::to_string(&dict)?;
+        let client = self.connection.client()?;
+        let mut conn = client.get_connection()?;
+        let _: () = redis::cmd("JSON.SET")
+            .arg(&config_key)
+            .arg(".")
+            .arg(&json_str)
+            .query(&mut conn)?;
+        Ok(())
     }
 
     /// Scans Redis keys matching a glob pattern.
@@ -669,6 +894,10 @@ fn validate_route(route: &Route) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+fn router_config_key(name: &str) -> String {
+    format!("{name}:route_config")
 }
 
 fn router_schema(name: &str, vector_dimensions: usize) -> Value {

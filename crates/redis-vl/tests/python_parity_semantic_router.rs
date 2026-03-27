@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use redis_vl::{
     CustomTextVectorizer, DistanceAggregationMethod, Route, RoutingConfig, SemanticRouter,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 
 static COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -341,6 +341,216 @@ fn python_test_router_delete_route_references_by_keys() {
     // In-memory route should have 0 references
     let farewell = router.get("farewell").expect("farewell route should exist");
     assert!(farewell.references.is_empty());
+
+    router.delete().expect("delete should succeed");
+}
+
+/// Mirrors `test_to_dict` from Python.
+#[test]
+fn python_test_router_to_dict() {
+    let Some(router) = create_router() else {
+        return;
+    };
+
+    let dict = router.to_dict().expect("to_dict should succeed");
+    assert_eq!(dict["name"], json!(router.name));
+    assert_eq!(dict["routes"].as_array().map(Vec::len), Some(2));
+    assert_eq!(dict["vectorizer"]["type"], json!("custom"));
+    assert!(dict.get("routing_config").is_some());
+
+    router.delete().expect("delete should succeed");
+}
+
+/// Mirrors `test_from_dict` from Python: round-trip via to_dict → from_dict.
+#[test]
+fn python_test_router_from_dict() {
+    let Some(router) = create_router() else {
+        return;
+    };
+
+    let dict = router.to_dict().expect("to_dict should succeed");
+    let new_router = SemanticRouter::from_dict(
+        dict.clone(),
+        redis_url(),
+        CustomTextVectorizer::new(|text| Ok(embed_text(text))),
+        true, // overwrite to reuse the same index
+    )
+    .expect("from_dict should succeed");
+
+    let new_dict = new_router.to_dict().expect("to_dict should succeed");
+    assert_eq!(dict, new_dict);
+
+    new_router.delete().expect("delete should succeed");
+}
+
+/// Mirrors `test_to_dict_missing_fields` from Python.
+#[test]
+fn python_test_router_from_dict_missing_fields() {
+    let data = json!({
+        "name": "incomplete-router",
+        "routes": [],
+        "vectorizer": {"type": "custom"},
+    });
+
+    let result = SemanticRouter::from_dict(
+        data,
+        redis_url(),
+        CustomTextVectorizer::new(|text| Ok(embed_text(text))),
+        false,
+    );
+    // Missing routing_config → should fail
+    assert!(result.is_err(), "should fail with missing routing_config");
+}
+
+/// Mirrors `test_from_existing` from Python.
+#[test]
+fn python_test_router_from_existing() {
+    if !integration_enabled() {
+        return;
+    }
+
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let name = format!("python_parity_from_existing_{id}");
+    let router = SemanticRouter::new(
+        name.clone(),
+        redis_url(),
+        routes(),
+        RoutingConfig {
+            max_k: 2,
+            aggregation_method: DistanceAggregationMethod::Avg,
+        },
+        CustomTextVectorizer::new(|text| Ok(embed_text(text))),
+    )
+    .expect("router should initialize");
+
+    // Reconnect from persisted state
+    let router2 = SemanticRouter::from_existing(
+        name.clone(),
+        redis_url(),
+        CustomTextVectorizer::new(|text| Ok(embed_text(text))),
+    )
+    .expect("from_existing should succeed");
+
+    let dict1 = router.to_dict().expect("to_dict should succeed");
+    let dict2 = router2.to_dict().expect("to_dict should succeed");
+    assert_eq!(dict1, dict2);
+
+    // Verify routing still works on the reconnected instance
+    let match_result = router2
+        .route(Some("hello"), None)
+        .expect("route should succeed");
+    assert_eq!(match_result.name.as_deref(), Some("greeting"));
+
+    router.delete().expect("delete should succeed");
+}
+
+/// Mirrors `test_to_yaml` / `test_from_yaml` from Python.
+#[test]
+fn python_test_router_yaml_round_trip() {
+    let Some(router) = create_router() else {
+        return;
+    };
+
+    let yaml_path = std::env::temp_dir().join(format!(
+        "test_router_yaml_{}.yaml",
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+
+    router
+        .to_yaml(&yaml_path, true)
+        .expect("to_yaml should succeed");
+    assert!(yaml_path.exists());
+
+    let new_router = SemanticRouter::from_yaml(
+        &yaml_path,
+        redis_url(),
+        CustomTextVectorizer::new(|text| Ok(embed_text(text))),
+        true, // overwrite
+    )
+    .expect("from_yaml should succeed");
+
+    let mut d1 = router.to_dict().expect("to_dict");
+    let mut d2 = new_router.to_dict().expect("to_dict");
+    // Remove name since it may differ in the reconstructed router
+    d1.as_object_mut().unwrap().remove("name");
+    d2.as_object_mut().unwrap().remove("name");
+    // The routes/config should match
+    assert_eq!(d1["routes"], d2["routes"]);
+    assert_eq!(d1["routing_config"], d2["routing_config"]);
+
+    let _ = std::fs::remove_file(&yaml_path);
+    new_router.delete().expect("delete should succeed");
+    router.delete().expect("delete should succeed");
+}
+
+/// Mirrors `test_yaml_invalid_file_path` from Python.
+#[test]
+fn python_test_router_yaml_invalid_file_path() {
+    let result = SemanticRouter::from_yaml(
+        "nonexistent_path_xyz.yaml",
+        redis_url(),
+        CustomTextVectorizer::new(|text| Ok(embed_text(text))),
+        false,
+    );
+    assert!(result.is_err());
+}
+
+/// Mirrors `test_idempotent_to_dict` from Python.
+#[test]
+fn python_test_router_idempotent_to_dict() {
+    let Some(router) = create_router() else {
+        return;
+    };
+
+    let dict = router.to_dict().expect("to_dict should succeed");
+    let new_router = SemanticRouter::from_dict(
+        dict.clone(),
+        redis_url(),
+        CustomTextVectorizer::new(|text| Ok(embed_text(text))),
+        true,
+    )
+    .expect("from_dict should succeed");
+    let new_dict = new_router.to_dict().expect("to_dict should succeed");
+    assert_eq!(dict, new_dict);
+
+    new_router.delete().expect("delete should succeed");
+}
+
+/// Tests that `add_route_references` persists state so `from_existing` sees changes.
+#[test]
+fn python_test_router_persist_after_add_references() {
+    if !integration_enabled() {
+        return;
+    }
+
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let name = format!("python_parity_persist_refs_{id}");
+    let mut router = SemanticRouter::new(
+        name.clone(),
+        redis_url(),
+        routes(),
+        RoutingConfig::default(),
+        CustomTextVectorizer::new(|text| Ok(embed_text(text))),
+    )
+    .expect("router should initialize");
+
+    router
+        .add_route_references("greeting", &["howdy".to_owned()])
+        .expect("add refs should succeed");
+
+    // Reconnect and verify the persisted config contains the new reference
+    let router2 = SemanticRouter::from_existing(
+        name,
+        redis_url(),
+        CustomTextVectorizer::new(|text| Ok(embed_text(text))),
+    )
+    .expect("from_existing should succeed");
+
+    let greeting = router2.get("greeting").expect("greeting should exist");
+    assert!(
+        greeting.references.contains(&"howdy".to_owned()),
+        "persisted state should include the added reference"
+    );
 
     router.delete().expect("delete should succeed");
 }

@@ -417,12 +417,40 @@ pub struct SemanticMessageHistory {
 
 impl SemanticMessageHistory {
     /// Creates a new semantic message history backed by a hash-based Redis Search index.
+    ///
+    /// If `overwrite` is needed, use [`new_with_options`] instead.
     pub fn new<V>(
         name: impl Into<String>,
         redis_url: impl Into<String>,
         distance_threshold: f32,
         vector_dimensions: usize,
         vectorizer: V,
+    ) -> Result<Self>
+    where
+        V: Vectorizer + 'static,
+    {
+        Self::new_with_options(
+            name,
+            redis_url,
+            distance_threshold,
+            vector_dimensions,
+            vectorizer,
+            false,
+        )
+    }
+
+    /// Creates a new semantic message history with explicit overwrite control.
+    ///
+    /// When `overwrite` is true the existing index is dropped and recreated.
+    /// When false and an index with the same name already exists, the existing
+    /// index is reused (the schema must match).
+    pub fn new_with_options<V>(
+        name: impl Into<String>,
+        redis_url: impl Into<String>,
+        distance_threshold: f32,
+        vector_dimensions: usize,
+        vectorizer: V,
+        overwrite: bool,
     ) -> Result<Self>
     where
         V: Vectorizer + 'static,
@@ -441,7 +469,7 @@ impl SemanticMessageHistory {
             semantic_message_history_schema(&name, vector_dimensions),
             redis_url,
         )?;
-        index.create_with_options(false, false)?;
+        index.create_with_options(overwrite, false)?;
 
         Ok(Self {
             history,
