@@ -2034,6 +2034,8 @@ fn schema_from_info(name: &str, info: &Map<String, Value>) -> Result<IndexSchema
                         case_sensitive,
                         sortable,
                         no_index,
+                        index_missing: false,
+                        index_empty: false,
                     },
                 },
                 "TEXT" => FieldKind::Text {
@@ -2044,13 +2046,25 @@ fn schema_from_info(name: &str, info: &Map<String, Value>) -> Result<IndexSchema
                         no_index,
                         phonetic,
                         with_suffix_trie,
+                        index_missing: false,
+                        index_empty: false,
                     },
                 },
                 "NUMERIC" => FieldKind::Numeric {
-                    attrs: crate::schema::NumericFieldAttributes { sortable, no_index },
+                    attrs: crate::schema::NumericFieldAttributes {
+                        sortable,
+                        no_index,
+                        index_missing: false,
+                        index_empty: false,
+                    },
                 },
                 "GEO" => FieldKind::Geo {
-                    attrs: crate::schema::GeoFieldAttributes { sortable, no_index },
+                    attrs: crate::schema::GeoFieldAttributes {
+                        sortable,
+                        no_index,
+                        index_missing: false,
+                        index_empty: false,
+                    },
                 },
                 "VECTOR" => {
                     let algo = match algorithm.as_str() {

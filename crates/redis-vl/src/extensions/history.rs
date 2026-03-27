@@ -990,3 +990,326 @@ fn number_value(value: f64) -> Result<Value> {
 fn _default_top_k() -> usize {
     DEFAULT_TOP_K
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn message_role_as_str() {
+        assert_eq!(MessageRole::System.as_str(), "system");
+        assert_eq!(MessageRole::User.as_str(), "user");
+        assert_eq!(MessageRole::Llm.as_str(), "llm");
+        assert_eq!(MessageRole::Tool.as_str(), "tool");
+    }
+
+    #[test]
+    fn message_role_try_from_valid() {
+        assert_eq!(
+            MessageRole::try_from("system").unwrap(),
+            MessageRole::System
+        );
+        assert_eq!(MessageRole::try_from("user").unwrap(), MessageRole::User);
+        assert_eq!(MessageRole::try_from("llm").unwrap(), MessageRole::Llm);
+        assert_eq!(MessageRole::try_from("tool").unwrap(), MessageRole::Tool);
+    }
+
+    #[test]
+    fn message_role_try_from_invalid() {
+        assert!(MessageRole::try_from("admin").is_err());
+        assert!(MessageRole::try_from("SYSTEM").is_err());
+        assert!(MessageRole::try_from("User").is_err());
+        assert!(MessageRole::try_from("").is_err());
+    }
+
+    #[test]
+    fn message_role_serde_roundtrip() {
+        let role = MessageRole::Llm;
+        let json = serde_json::to_string(&role).unwrap();
+        assert_eq!(json, "\"llm\"");
+        let deserialized: MessageRole = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, role);
+    }
+
+    #[test]
+    fn message_new_defaults() {
+        let message = Message::new(MessageRole::User, "hello");
+        assert_eq!(message.role, MessageRole::User);
+        assert_eq!(message.content, "hello");
+        assert!(message.entry_id.is_none());
+        assert!(message.session_tag.is_none());
+        assert!(message.timestamp.is_none());
+        assert!(message.tool_call_id.is_none());
+        assert!(message.metadata.is_none());
+    }
+
+    #[test]
+    fn message_with_defaults_populates_fields() {
+        let message = Message::new(MessageRole::User, "test content");
+        let filled = message.with_defaults("my_session");
+        assert!(filled.entry_id.is_some());
+        assert_eq!(filled.session_tag.as_deref(), Some("my_session"));
+        assert!(filled.timestamp.is_some());
+        // Entry ID should contain the session tag
+        let entry_id = filled.entry_id.unwrap();
+        assert!(entry_id.starts_with("my_session:"));
+    }
+
+    #[test]
+    fn message_with_defaults_preserves_existing() {
+        let message = Message {
+            entry_id: Some("custom_id".to_owned()),
+            session_tag: Some("custom_session".to_owned()),
+            timestamp: Some(42.0),
+            ..Message::new(MessageRole::Llm, "content")
+        };
+        let filled = message.with_defaults("other_session");
+        assert_eq!(filled.entry_id.as_deref(), Some("custom_id"));
+        assert_eq!(filled.session_tag.as_deref(), Some("custom_session"));
+        assert_eq!(filled.timestamp, Some(42.0));
+    }
+
+    #[test]
+    fn message_with_defaults_unique_ids_for_same_session() {
+        let session = "test_session";
+        let ids: Vec<String> = (0..10)
+            .map(|i| {
+                let message = Message::new(MessageRole::User, format!("message {i}"));
+                message.with_defaults(session).entry_id.unwrap()
+            })
+            .collect();
+        // All IDs should be unique
+        let unique: std::collections::HashSet<&String> = ids.iter().collect();
+        assert_eq!(unique.len(), ids.len(), "All message IDs should be unique");
+    }
+
+    #[test]
+    fn message_serde_roundtrip() {
+        let message = Message {
+            tool_call_id: Some("tool_1".to_owned()),
+            metadata: Some(serde_json::json!({"key": "value"})),
+            ..Message::new(MessageRole::Tool, "tool result")
+        };
+        let json = serde_json::to_string(&message).unwrap();
+        let deserialized: Message = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, message);
+    }
+
+    #[test]
+    fn message_serde_metadata_types() {
+        // Metadata can be any JSON value
+        for metadata in [
+            serde_json::json!("raw string"),
+            serde_json::json!(42),
+            serde_json::json!([1, 2, 3]),
+            serde_json::json!({"nested": {"key": "value"}}),
+        ] {
+            let message = Message {
+                metadata: Some(metadata.clone()),
+                ..Message::new(MessageRole::User, "test")
+            };
+            let json = serde_json::to_string(&message).unwrap();
+            let deserialized: Message = serde_json::from_str(&json).unwrap();
+            assert_eq!(deserialized.metadata, Some(metadata));
+        }
+    }
+
+    #[test]
+    fn validate_top_k_accepts_zero() {
+        assert!(validate_top_k(0).is_ok());
+    }
+
+    #[test]
+    fn validate_top_k_accepts_normal() {
+        assert!(validate_top_k(5).is_ok());
+        assert!(validate_top_k(100).is_ok());
+    }
+
+    #[test]
+    fn validate_top_k_rejects_huge() {
+        assert!(validate_top_k(200_000).is_err());
+    }
+
+    #[test]
+    fn validate_distance_threshold_valid() {
+        assert!(validate_distance_threshold(0.0).is_ok());
+        assert!(validate_distance_threshold(0.5).is_ok());
+        assert!(validate_distance_threshold(2.0).is_ok());
+    }
+
+    #[test]
+    fn validate_distance_threshold_invalid() {
+        assert!(validate_distance_threshold(-0.1).is_err());
+        assert!(validate_distance_threshold(2.1).is_err());
+    }
+
+    #[test]
+    fn normalize_roles_none_passes_through() {
+        assert!(normalize_roles(None).unwrap().is_none());
+    }
+
+    #[test]
+    fn normalize_roles_empty_rejects() {
+        assert!(normalize_roles(Some(&[])).is_err());
+    }
+
+    #[test]
+    fn normalize_roles_non_empty_passes() {
+        let roles = [MessageRole::User];
+        let result = normalize_roles(Some(&roles)).unwrap();
+        assert_eq!(result, Some(roles.as_slice()));
+    }
+
+    #[test]
+    fn apply_role_filter_no_filter() {
+        let mut messages = vec![
+            Message::new(MessageRole::System, "sys"),
+            Message::new(MessageRole::User, "user"),
+        ];
+        apply_role_filter(&mut messages, None);
+        assert_eq!(messages.len(), 2);
+    }
+
+    #[test]
+    fn apply_role_filter_single_role() {
+        let mut messages = vec![
+            Message::new(MessageRole::System, "sys"),
+            Message::new(MessageRole::User, "user"),
+            Message::new(MessageRole::Llm, "llm"),
+            Message::new(MessageRole::Tool, "tool"),
+        ];
+        apply_role_filter(&mut messages, Some(&[MessageRole::User]));
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].role, MessageRole::User);
+    }
+
+    #[test]
+    fn apply_role_filter_multiple_roles() {
+        let mut messages = vec![
+            Message::new(MessageRole::System, "sys"),
+            Message::new(MessageRole::User, "user"),
+            Message::new(MessageRole::Llm, "llm"),
+            Message::new(MessageRole::Tool, "tool"),
+        ];
+        apply_role_filter(
+            &mut messages,
+            Some(&[MessageRole::System, MessageRole::Tool]),
+        );
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, MessageRole::System);
+        assert_eq!(messages[1].role, MessageRole::Tool);
+    }
+
+    #[test]
+    fn semantic_schema_has_expected_fields() {
+        let schema = semantic_message_history_schema("test_history", 128);
+        let fields = schema["fields"].as_array().unwrap();
+        let field_names: Vec<&str> = fields.iter().filter_map(|f| f["name"].as_str()).collect();
+        assert!(field_names.contains(&"entry_id"));
+        assert!(field_names.contains(&"role"));
+        assert!(field_names.contains(&"content"));
+        assert!(field_names.contains(&"tool_call_id"));
+        assert!(field_names.contains(&"timestamp"));
+        assert!(field_names.contains(&"session_tag"));
+        assert!(field_names.contains(&"metadata"));
+        assert!(field_names.contains(&"message_vector"));
+
+        // Vector field should have the correct dimensions
+        let vector_field = fields
+            .iter()
+            .find(|f| f["name"].as_str() == Some("message_vector"))
+            .unwrap();
+        assert_eq!(vector_field["attrs"]["dims"], 128);
+        assert_eq!(vector_field["attrs"]["datatype"], "float32");
+    }
+
+    #[test]
+    fn message_from_document_basic() {
+        let mut doc = Map::new();
+        doc.insert("entry_id".to_owned(), Value::String("id_1".to_owned()));
+        doc.insert("role".to_owned(), Value::String("user".to_owned()));
+        doc.insert(
+            "content".to_owned(),
+            Value::String("hello world".to_owned()),
+        );
+        doc.insert(
+            "session_tag".to_owned(),
+            Value::String("session_1".to_owned()),
+        );
+        doc.insert(
+            "timestamp".to_owned(),
+            Value::Number(serde_json::Number::from_f64(1000.0).unwrap()),
+        );
+
+        let message = message_from_document(doc).unwrap();
+        assert_eq!(message.entry_id.as_deref(), Some("id_1"));
+        assert_eq!(message.role, MessageRole::User);
+        assert_eq!(message.content, "hello world");
+        assert_eq!(message.session_tag.as_deref(), Some("session_1"));
+        assert_eq!(message.timestamp, Some(1000.0));
+        assert!(message.tool_call_id.is_none());
+        assert!(message.metadata.is_none());
+    }
+
+    #[test]
+    fn message_from_document_with_tool_and_metadata() {
+        let mut doc = Map::new();
+        doc.insert("role".to_owned(), Value::String("tool".to_owned()));
+        doc.insert(
+            "content".to_owned(),
+            Value::String("tool result".to_owned()),
+        );
+        doc.insert(
+            "tool_call_id".to_owned(),
+            Value::String("call_1".to_owned()),
+        );
+        doc.insert(
+            "metadata".to_owned(),
+            Value::String(r#"{"key":"value"}"#.to_owned()),
+        );
+
+        let message = message_from_document(doc).unwrap();
+        assert_eq!(message.role, MessageRole::Tool);
+        assert_eq!(message.tool_call_id.as_deref(), Some("call_1"));
+        assert_eq!(message.metadata, Some(serde_json::json!({"key": "value"})));
+    }
+
+    #[test]
+    fn message_from_document_string_timestamp() {
+        let mut doc = Map::new();
+        doc.insert("role".to_owned(), Value::String("llm".to_owned()));
+        doc.insert("content".to_owned(), Value::String("response".to_owned()));
+        doc.insert("timestamp".to_owned(), Value::String("1234.5".to_owned()));
+
+        let message = message_from_document(doc).unwrap();
+        assert_eq!(message.timestamp, Some(1234.5));
+    }
+
+    #[test]
+    fn message_from_document_missing_content_fails() {
+        let mut doc = Map::new();
+        doc.insert("role".to_owned(), Value::String("user".to_owned()));
+        // Missing "content"
+
+        assert!(message_from_document(doc).is_err());
+    }
+
+    #[test]
+    fn number_value_finite() {
+        let val = number_value(42.5).unwrap();
+        assert_eq!(
+            val,
+            Value::Number(serde_json::Number::from_f64(42.5).unwrap())
+        );
+    }
+
+    #[test]
+    fn number_value_nan_fails() {
+        assert!(number_value(f64::NAN).is_err());
+    }
+
+    #[test]
+    fn number_value_infinity_fails() {
+        assert!(number_value(f64::INFINITY).is_err());
+    }
+}

@@ -967,3 +967,230 @@ fn aggregate_distances(distances: &[f32], aggregation_method: DistanceAggregatio
         DistanceAggregationMethod::Sum => distances.iter().sum::<f32>(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn route_new_defaults() {
+        let route = Route::new("test", vec!["ref1".to_owned()]);
+        assert_eq!(route.name, "test");
+        assert_eq!(route.references, vec!["ref1".to_owned()]);
+        assert!(route.metadata.is_empty());
+        assert!(route.distance_threshold.is_none());
+    }
+
+    #[test]
+    fn route_effective_threshold_default() {
+        let route = Route::new("test", vec!["ref1".to_owned()]);
+        assert_eq!(
+            route.effective_threshold(),
+            DEFAULT_ROUTE_DISTANCE_THRESHOLD
+        );
+    }
+
+    #[test]
+    fn route_effective_threshold_custom() {
+        let route = Route {
+            distance_threshold: Some(0.3),
+            ..Route::new("test", vec!["ref1".to_owned()])
+        };
+        assert_eq!(route.effective_threshold(), 0.3);
+    }
+
+    #[test]
+    fn route_match_no_match() {
+        let rm = RouteMatch::no_match();
+        assert!(rm.name.is_none());
+        assert!(rm.distance.is_none());
+    }
+
+    #[test]
+    fn routing_config_default() {
+        let config = RoutingConfig::default();
+        assert_eq!(config.max_k, 1);
+        assert_eq!(config.aggregation_method, DistanceAggregationMethod::Avg);
+    }
+
+    #[test]
+    fn routing_config_serde_roundtrip() {
+        let config = RoutingConfig {
+            max_k: 5,
+            aggregation_method: DistanceAggregationMethod::Min,
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let deserialized: RoutingConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.max_k, 5);
+        assert_eq!(
+            deserialized.aggregation_method,
+            DistanceAggregationMethod::Min
+        );
+    }
+
+    #[test]
+    fn validate_route_ok() {
+        let route = Route {
+            distance_threshold: Some(0.3),
+            ..Route::new("greeting", vec!["hello".to_owned()])
+        };
+        assert!(validate_route(&route).is_ok());
+    }
+
+    #[test]
+    fn validate_route_empty_name() {
+        let route = Route::new("", vec!["hello".to_owned()]);
+        assert!(validate_route(&route).is_err());
+    }
+
+    #[test]
+    fn validate_route_whitespace_name() {
+        let route = Route::new("  ", vec!["hello".to_owned()]);
+        assert!(validate_route(&route).is_err());
+    }
+
+    #[test]
+    fn validate_route_empty_references() {
+        let route = Route::new("test", vec![]);
+        assert!(validate_route(&route).is_err());
+    }
+
+    #[test]
+    fn validate_route_empty_reference_string() {
+        let route = Route::new("test", vec!["".to_owned()]);
+        assert!(validate_route(&route).is_err());
+    }
+
+    #[test]
+    fn validate_route_bad_threshold() {
+        let route = Route {
+            distance_threshold: Some(-0.1),
+            ..Route::new("test", vec!["hello".to_owned()])
+        };
+        assert!(validate_route(&route).is_err());
+
+        let route = Route {
+            distance_threshold: Some(2.5),
+            ..Route::new("test", vec!["hello".to_owned()])
+        };
+        assert!(validate_route(&route).is_err());
+    }
+
+    #[test]
+    fn route_reference_id_deterministic() {
+        let id1 = route_reference_id("greeting", "hello");
+        let id2 = route_reference_id("greeting", "hello");
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn route_reference_id_different_for_different_refs() {
+        let id1 = route_reference_id("greeting", "hello");
+        let id2 = route_reference_id("greeting", "hi");
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn route_reference_id_different_for_different_routes() {
+        let id1 = route_reference_id("greeting", "hello");
+        let id2 = route_reference_id("farewell", "hello");
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn hashify_deterministic() {
+        assert_eq!(hashify("test"), hashify("test"));
+        assert_ne!(hashify("test"), hashify("other"));
+    }
+
+    #[test]
+    fn aggregate_distances_avg() {
+        let result = aggregate_distances(&[0.1, 0.3], DistanceAggregationMethod::Avg);
+        assert!((result - 0.2).abs() < 1e-6);
+    }
+
+    #[test]
+    fn aggregate_distances_min() {
+        let result = aggregate_distances(&[0.3, 0.1, 0.5], DistanceAggregationMethod::Min);
+        assert!((result - 0.1).abs() < 1e-6);
+    }
+
+    #[test]
+    fn aggregate_distances_sum() {
+        let result = aggregate_distances(&[0.1, 0.2, 0.3], DistanceAggregationMethod::Sum);
+        assert!((result - 0.6).abs() < 1e-6);
+    }
+
+    #[test]
+    fn parse_distance_number() {
+        let val = Value::Number(serde_json::Number::from_f64(0.5).unwrap());
+        assert_eq!(parse_distance(Some(&val)), Some(0.5));
+    }
+
+    #[test]
+    fn parse_distance_string() {
+        let val = Value::String("0.25".to_owned());
+        assert_eq!(parse_distance(Some(&val)), Some(0.25));
+    }
+
+    #[test]
+    fn parse_distance_none() {
+        assert_eq!(parse_distance(None), None);
+    }
+
+    #[test]
+    fn parse_distance_invalid() {
+        let val = Value::String("not_a_number".to_owned());
+        assert_eq!(parse_distance(Some(&val)), None);
+    }
+
+    #[test]
+    fn router_schema_structure() {
+        let schema = router_schema("my_router", 64);
+        assert_eq!(schema["index"]["name"], "my_router");
+        assert_eq!(schema["index"]["prefix"], "my_router");
+        assert_eq!(schema["index"]["storage_type"], "hash");
+
+        let fields = schema["fields"].as_array().unwrap();
+        let field_names: Vec<&str> = fields.iter().filter_map(|f| f["name"].as_str()).collect();
+        assert!(field_names.contains(&"reference_id"));
+        assert!(field_names.contains(&"route_name"));
+        assert!(field_names.contains(&"reference"));
+        assert!(field_names.contains(&"vector"));
+
+        let vector_field = fields
+            .iter()
+            .find(|f| f["name"].as_str() == Some("vector"))
+            .unwrap();
+        assert_eq!(vector_field["attrs"]["dims"], 64);
+        assert_eq!(vector_field["attrs"]["datatype"], "float32");
+    }
+
+    #[test]
+    fn distance_aggregation_method_serde() {
+        let json = serde_json::to_string(&DistanceAggregationMethod::Min).unwrap();
+        assert_eq!(json, "\"min\"");
+        let deserialized: DistanceAggregationMethod = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, DistanceAggregationMethod::Min);
+    }
+
+    #[test]
+    fn route_serde_roundtrip() {
+        let route = Route {
+            name: "test".to_owned(),
+            references: vec!["hello".to_owned(), "hi".to_owned()],
+            metadata: serde_json::Map::from_iter([("type".to_owned(), json!("greeting"))]),
+            distance_threshold: Some(0.3),
+        };
+        let json = serde_json::to_string(&route).unwrap();
+        let deserialized: Route = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.name, "test");
+        assert_eq!(deserialized.references, vec!["hello", "hi"]);
+        assert_eq!(deserialized.distance_threshold, Some(0.3));
+    }
+
+    #[test]
+    fn router_config_key_format() {
+        assert_eq!(router_config_key("my_router"), "my_router:route_config");
+    }
+}

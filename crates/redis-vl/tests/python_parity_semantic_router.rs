@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use redis_vl::{
     CustomTextVectorizer, DistanceAggregationMethod, Route, RoutingConfig, SemanticRouter,
 };
-use serde_json::{Value, json};
+use serde_json::json;
 
 static COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -514,6 +514,85 @@ fn python_test_router_idempotent_to_dict() {
     assert_eq!(dict, new_dict);
 
     new_router.delete().expect("delete should succeed");
+}
+
+/// Mirrors `test_routes_different_distance_thresholds_get_two` from Python.
+/// Routes with generous per-route thresholds should both match.
+#[test]
+fn python_test_routes_different_distance_thresholds_get_two() {
+    if !integration_enabled() {
+        return;
+    }
+
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut test_routes = routes();
+    test_routes[0].distance_threshold = Some(0.5);
+    test_routes[1].distance_threshold = Some(0.7);
+
+    let router = SemanticRouter::new_with_options(
+        format!("python_parity_thresh_two_{id}"),
+        redis_url(),
+        test_routes,
+        RoutingConfig {
+            max_k: 2,
+            aggregation_method: DistanceAggregationMethod::Avg,
+        },
+        CustomTextVectorizer::new(|text| Ok(embed_text(text))),
+        true,
+    )
+    .expect("router should initialize");
+
+    let matches = router
+        .route_many(Some("hello"), None, Some(2), None)
+        .expect("route_many should succeed");
+    assert_eq!(
+        matches.len(),
+        2,
+        "both routes should match with generous thresholds"
+    );
+    assert_eq!(matches[0].name.as_deref(), Some("greeting"));
+    assert_eq!(matches[1].name.as_deref(), Some("farewell"));
+
+    router.delete().expect("delete should succeed");
+}
+
+/// Mirrors `test_routes_different_distance_thresholds_get_one` from Python.
+/// Only the route with a generous threshold should match; the tight one shouldn't.
+#[test]
+fn python_test_routes_different_distance_thresholds_get_one() {
+    if !integration_enabled() {
+        return;
+    }
+
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let mut test_routes = routes();
+    test_routes[0].distance_threshold = Some(0.5); // greeting: generous
+    test_routes[1].distance_threshold = Some(0.3); // farewell: tight, won't match "hello"
+
+    let router = SemanticRouter::new_with_options(
+        format!("python_parity_thresh_one_{id}"),
+        redis_url(),
+        test_routes,
+        RoutingConfig {
+            max_k: 2,
+            aggregation_method: DistanceAggregationMethod::Avg,
+        },
+        CustomTextVectorizer::new(|text| Ok(embed_text(text))),
+        true,
+    )
+    .expect("router should initialize");
+
+    let matches = router
+        .route_many(Some("hello"), None, Some(2), None)
+        .expect("route_many should succeed");
+    assert_eq!(
+        matches.len(),
+        1,
+        "only greeting should match with tight farewell threshold"
+    );
+    assert_eq!(matches[0].name.as_deref(), Some("greeting"));
+
+    router.delete().expect("delete should succeed");
 }
 
 /// Tests that `add_route_references` persists state so `from_existing` sees changes.
