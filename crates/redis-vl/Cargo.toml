@@ -50,7 +50,12 @@ workspace = true
 
 [dev-dependencies]
 criterion = { version = "0.7.0", features = ["html_reports"] }
+rand = "0.8"
 
 [[bench]]
 name = "core_benchmarks"
+harness = false
+
+[[bench]]
+name = "redis_benchmarks"
 harness = false

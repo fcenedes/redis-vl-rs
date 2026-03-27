@@ -30,10 +30,10 @@ fields:
   - name: embedding
     type: vector
     attrs:
-      algorithm: flat
+      algorithm: FLAT
       dims: 128
-      distance_metric: cosine
-      datatype: float32
+      distance_metric: COSINE
+      datatype: FLOAT32
 "#;
 
 fn bench_schema_from_yaml(c: &mut Criterion) {
