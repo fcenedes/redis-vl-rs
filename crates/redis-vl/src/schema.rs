@@ -352,11 +352,20 @@ pub struct TagFieldAttributes {
     /// Separator for multi-value tags.
     pub separator: Option<String>,
     /// Whether to disable case normalization.
+    #[serde(default)]
     pub case_sensitive: bool,
     /// Whether the field should be sortable.
+    #[serde(default)]
     pub sortable: bool,
     /// Whether indexing should be disabled.
+    #[serde(default)]
     pub no_index: bool,
+    /// Whether to index missing values so `ismissing(@field)` works.
+    #[serde(default)]
+    pub index_missing: bool,
+    /// Whether to index empty values so `isempty(@field)` works.
+    #[serde(default)]
+    pub index_empty: bool,
 }
 
 impl TagFieldAttributes {
@@ -374,6 +383,12 @@ impl TagFieldAttributes {
         if self.no_index {
             args.push("NOINDEX".to_owned());
         }
+        if self.index_missing {
+            args.push("INDEXMISSING".to_owned());
+        }
+        if self.index_empty {
+            args.push("INDEXEMPTY".to_owned());
+        }
     }
 }
 
@@ -383,15 +398,25 @@ pub struct TextFieldAttributes {
     /// Relative text field weight.
     pub weight: Option<f32>,
     /// Whether the field should be sortable.
+    #[serde(default)]
     pub sortable: bool,
     /// Whether stemming should be disabled.
+    #[serde(default)]
     pub no_stem: bool,
     /// Whether indexing should be disabled.
+    #[serde(default)]
     pub no_index: bool,
     /// Optional phonetic matcher.
     pub phonetic: Option<String>,
     /// Whether suffix trie indexing should be enabled.
+    #[serde(default)]
     pub with_suffix_trie: bool,
+    /// Whether to index missing values so `ismissing(@field)` works.
+    #[serde(default)]
+    pub index_missing: bool,
+    /// Whether to index empty values so `isempty(@field)` works.
+    #[serde(default)]
+    pub index_empty: bool,
 }
 
 impl TextFieldAttributes {
@@ -416,6 +441,12 @@ impl TextFieldAttributes {
         if self.with_suffix_trie {
             args.push("WITHSUFFIXTRIE".to_owned());
         }
+        if self.index_missing {
+            args.push("INDEXMISSING".to_owned());
+        }
+        if self.index_empty {
+            args.push("INDEXEMPTY".to_owned());
+        }
     }
 }
 
@@ -423,9 +454,17 @@ impl TextFieldAttributes {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NumericFieldAttributes {
     /// Whether the field should be sortable.
+    #[serde(default)]
     pub sortable: bool,
     /// Whether indexing should be disabled.
+    #[serde(default)]
     pub no_index: bool,
+    /// Whether to index missing values so `ismissing(@field)` works.
+    #[serde(default)]
+    pub index_missing: bool,
+    /// Whether to index empty values so `isempty(@field)` works.
+    #[serde(default)]
+    pub index_empty: bool,
 }
 
 impl NumericFieldAttributes {
@@ -436,6 +475,12 @@ impl NumericFieldAttributes {
         if self.no_index {
             args.push("NOINDEX".to_owned());
         }
+        if self.index_missing {
+            args.push("INDEXMISSING".to_owned());
+        }
+        if self.index_empty {
+            args.push("INDEXEMPTY".to_owned());
+        }
     }
 }
 
@@ -443,9 +488,17 @@ impl NumericFieldAttributes {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GeoFieldAttributes {
     /// Whether the field should be sortable.
+    #[serde(default)]
     pub sortable: bool,
     /// Whether indexing should be disabled.
+    #[serde(default)]
     pub no_index: bool,
+    /// Whether to index missing values so `ismissing(@field)` works.
+    #[serde(default)]
+    pub index_missing: bool,
+    /// Whether to index empty values so `isempty(@field)` works.
+    #[serde(default)]
+    pub index_empty: bool,
 }
 
 impl GeoFieldAttributes {
@@ -456,6 +509,12 @@ impl GeoFieldAttributes {
         if self.no_index {
             args.push("NOINDEX".to_owned());
         }
+        if self.index_missing {
+            args.push("INDEXMISSING".to_owned());
+        }
+        if self.index_empty {
+            args.push("INDEXEMPTY".to_owned());
+        }
     }
 }
 
@@ -463,9 +522,17 @@ impl GeoFieldAttributes {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct TimestampFieldAttributes {
     /// Whether the field should be sortable.
+    #[serde(default)]
     pub sortable: bool,
     /// Whether indexing should be disabled.
+    #[serde(default)]
     pub no_index: bool,
+    /// Whether to index missing values so `ismissing(@field)` works.
+    #[serde(default)]
+    pub index_missing: bool,
+    /// Whether to index empty values so `isempty(@field)` works.
+    #[serde(default)]
+    pub index_empty: bool,
 }
 
 impl TimestampFieldAttributes {
@@ -475,6 +542,12 @@ impl TimestampFieldAttributes {
         }
         if self.no_index {
             args.push("NOINDEX".to_owned());
+        }
+        if self.index_missing {
+            args.push("INDEXMISSING".to_owned());
+        }
+        if self.index_empty {
+            args.push("INDEXEMPTY".to_owned());
         }
     }
 }
@@ -499,9 +572,13 @@ impl VectorAlgorithm {
 }
 
 /// Supported vector element data types.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum VectorDataType {
+    /// Brain floating point 16-bit vectors.
+    Bfloat16,
+    /// IEEE 754 half-precision 16-bit vectors.
+    Float16,
     /// 32-bit floating point vectors.
     Float32,
     /// 64-bit floating point vectors.
@@ -511,9 +588,52 @@ pub enum VectorDataType {
 impl VectorDataType {
     fn redis_name(self) -> &'static str {
         match self {
+            Self::Bfloat16 => "BFLOAT16",
+            Self::Float16 => "FLOAT16",
             Self::Float32 => "FLOAT32",
             Self::Float64 => "FLOAT64",
         }
+    }
+
+    /// Returns the lowercase string representation (e.g. `"float32"`).
+    ///
+    /// This matches the convention used by Python RedisVL and is useful
+    /// when constructing JSON schema values dynamically.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Bfloat16 => "bfloat16",
+            Self::Float16 => "float16",
+            Self::Float32 => "float32",
+            Self::Float64 => "float64",
+        }
+    }
+}
+
+impl std::fmt::Display for VectorDataType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for VectorDataType {
+    type Err = crate::Error;
+
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "bfloat16" => Ok(Self::Bfloat16),
+            "float16" => Ok(Self::Float16),
+            "float32" => Ok(Self::Float32),
+            "float64" => Ok(Self::Float64),
+            other => Err(crate::Error::InvalidInput(format!(
+                "unknown vector data type '{other}'; expected bfloat16, float16, float32, or float64"
+            ))),
+        }
+    }
+}
+
+impl Default for VectorDataType {
+    fn default() -> Self {
+        Self::Float32
     }
 }
 
@@ -699,5 +819,68 @@ fields:
 
         assert_eq!(schema.index.prefix.len(), 2);
         assert_eq!(schema.index.prefix.all(), vec!["alpha", "beta"]);
+    }
+
+    // ── index_missing / index_empty parity tests (upstream: test_fields.py) ──
+
+    #[test]
+    fn tag_field_index_missing_should_render_indexmissing_arg() {
+        let schema = IndexSchema::from_json_value(serde_json::json!({
+            "index": { "name": "test_missing" },
+            "fields": [
+                { "name": "brand", "type": "tag", "attrs": { "index_missing": true } }
+            ]
+        }))
+        .expect("schema should parse");
+
+        let args = schema.fields[0].redis_args(StorageType::Hash);
+        assert!(args.contains(&"INDEXMISSING".to_owned()));
+    }
+
+    #[test]
+    fn numeric_field_index_empty_should_render_indexempty_arg() {
+        let schema = IndexSchema::from_json_value(serde_json::json!({
+            "index": { "name": "test_empty" },
+            "fields": [
+                { "name": "price", "type": "numeric", "attrs": { "index_empty": true } }
+            ]
+        }))
+        .expect("schema should parse");
+
+        let args = schema.fields[0].redis_args(StorageType::Hash);
+        assert!(args.contains(&"INDEXEMPTY".to_owned()));
+    }
+
+    #[test]
+    fn text_field_both_index_missing_and_index_empty() {
+        let schema = IndexSchema::from_json_value(serde_json::json!({
+            "index": { "name": "test_both" },
+            "fields": [
+                { "name": "description", "type": "text", "attrs": { "index_missing": true, "index_empty": true } }
+            ]
+        }))
+        .expect("schema should parse");
+
+        let args = schema.fields[0].redis_args(StorageType::Hash);
+        assert!(args.contains(&"INDEXMISSING".to_owned()));
+        assert!(args.contains(&"INDEXEMPTY".to_owned()));
+    }
+
+    #[test]
+    fn fields_default_to_no_index_missing_or_empty() {
+        let schema = IndexSchema::from_yaml_str(
+            r#"
+index:
+  name: test_defaults
+fields:
+  - name: brand
+    type: tag
+"#,
+        )
+        .expect("schema should parse");
+
+        let args = schema.fields[0].redis_args(StorageType::Hash);
+        assert!(!args.contains(&"INDEXMISSING".to_owned()));
+        assert!(!args.contains(&"INDEXEMPTY".to_owned()));
     }
 }

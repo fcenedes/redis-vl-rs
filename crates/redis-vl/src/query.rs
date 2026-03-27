@@ -217,6 +217,47 @@ impl<'a> Vector<'a> {
     }
 }
 
+/// Hybrid policy for vector search.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HybridPolicy {
+    /// Batched hybrid search.
+    Batches,
+    /// Ad-hoc brute-force hybrid search.
+    AdhocBf,
+}
+
+impl HybridPolicy {
+    /// Returns the Redis Search string representation.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Batches => "BATCHES",
+            Self::AdhocBf => "ADHOC_BF",
+        }
+    }
+}
+
+/// Search history mode for SVS-VAMANA indexes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchHistoryMode {
+    /// Disable search history.
+    Off,
+    /// Enable search history.
+    On,
+    /// Let the engine decide.
+    Auto,
+}
+
+impl SearchHistoryMode {
+    /// Returns the Redis Search string representation.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Off => "OFF",
+            Self::On => "ON",
+            Self::Auto => "AUTO",
+        }
+    }
+}
+
 /// Vector nearest-neighbor query.
 #[derive(Debug, Clone)]
 pub struct VectorQuery<'a> {
@@ -225,6 +266,12 @@ pub struct VectorQuery<'a> {
     num_results: usize,
     filter_expression: Option<FilterExpression>,
     ef_runtime: Option<usize>,
+    epsilon: Option<f64>,
+    hybrid_policy: Option<HybridPolicy>,
+    batch_size: Option<usize>,
+    search_window_size: Option<usize>,
+    use_search_history: Option<SearchHistoryMode>,
+    search_buffer_capacity: Option<usize>,
     options: QueryOptions,
 }
 
@@ -248,6 +295,12 @@ impl<'a> VectorQuery<'a> {
             num_results,
             filter_expression: None,
             ef_runtime: None,
+            epsilon: None,
+            hybrid_policy: None,
+            batch_size: None,
+            search_window_size: None,
+            use_search_history: None,
+            search_buffer_capacity: None,
             options,
         }
     }
@@ -263,10 +316,116 @@ impl<'a> VectorQuery<'a> {
         self.filter_expression = Some(filter_expression);
     }
 
-    /// Sets the runtime EF parameter.
+    /// Sets the runtime EF parameter (HNSW indexes).
     pub fn with_ef_runtime(mut self, ef_runtime: usize) -> Self {
         self.ef_runtime = Some(ef_runtime);
         self
+    }
+
+    /// Replaces the runtime EF parameter in place.
+    pub fn set_ef_runtime(&mut self, ef_runtime: usize) {
+        self.ef_runtime = Some(ef_runtime);
+    }
+
+    /// Returns the current EF runtime setting.
+    pub fn ef_runtime(&self) -> Option<usize> {
+        self.ef_runtime
+    }
+
+    /// Sets the epsilon parameter for approximate search.
+    pub fn with_epsilon(mut self, epsilon: f64) -> Self {
+        self.epsilon = Some(epsilon);
+        self
+    }
+
+    /// Replaces the epsilon parameter in place.
+    pub fn set_epsilon(&mut self, epsilon: f64) {
+        self.epsilon = Some(epsilon);
+    }
+
+    /// Returns the current epsilon setting.
+    pub fn epsilon(&self) -> Option<f64> {
+        self.epsilon
+    }
+
+    /// Sets the hybrid search policy.
+    pub fn with_hybrid_policy(mut self, policy: HybridPolicy) -> Self {
+        self.hybrid_policy = Some(policy);
+        self
+    }
+
+    /// Replaces the hybrid search policy in place.
+    pub fn set_hybrid_policy(&mut self, policy: HybridPolicy) {
+        self.hybrid_policy = Some(policy);
+    }
+
+    /// Returns the current hybrid policy setting.
+    pub fn hybrid_policy(&self) -> Option<HybridPolicy> {
+        self.hybrid_policy
+    }
+
+    /// Sets the batch size for `BATCHES` hybrid search policy.
+    pub fn with_batch_size(mut self, batch_size: usize) -> Self {
+        self.batch_size = Some(batch_size);
+        self
+    }
+
+    /// Replaces the batch size in place.
+    pub fn set_batch_size(&mut self, batch_size: usize) {
+        self.batch_size = Some(batch_size);
+    }
+
+    /// Returns the current batch size setting.
+    pub fn batch_size(&self) -> Option<usize> {
+        self.batch_size
+    }
+
+    /// Sets the search window size (SVS-VAMANA indexes).
+    pub fn with_search_window_size(mut self, size: usize) -> Self {
+        self.search_window_size = Some(size);
+        self
+    }
+
+    /// Replaces the search window size in place.
+    pub fn set_search_window_size(&mut self, size: usize) {
+        self.search_window_size = Some(size);
+    }
+
+    /// Returns the current search window size setting.
+    pub fn search_window_size(&self) -> Option<usize> {
+        self.search_window_size
+    }
+
+    /// Sets the search history mode (SVS-VAMANA indexes).
+    pub fn with_use_search_history(mut self, mode: SearchHistoryMode) -> Self {
+        self.use_search_history = Some(mode);
+        self
+    }
+
+    /// Replaces the search history mode in place.
+    pub fn set_use_search_history(&mut self, mode: SearchHistoryMode) {
+        self.use_search_history = Some(mode);
+    }
+
+    /// Returns the current search history mode.
+    pub fn use_search_history(&self) -> Option<SearchHistoryMode> {
+        self.use_search_history
+    }
+
+    /// Sets the search buffer capacity (SVS-VAMANA indexes).
+    pub fn with_search_buffer_capacity(mut self, capacity: usize) -> Self {
+        self.search_buffer_capacity = Some(capacity);
+        self
+    }
+
+    /// Replaces the search buffer capacity in place.
+    pub fn set_search_buffer_capacity(&mut self, capacity: usize) {
+        self.search_buffer_capacity = Some(capacity);
+    }
+
+    /// Returns the current search buffer capacity.
+    pub fn search_buffer_capacity(&self) -> Option<usize> {
+        self.search_buffer_capacity
     }
 
     /// Replaces the return field list.
@@ -329,20 +488,70 @@ impl QueryString for VectorQuery<'_> {
             .as_ref()
             .map_or_else(|| "*".to_owned(), FilterExpression::to_redis_syntax);
         let mut query = format!(
-            "{}=>[KNN {} @{} $vector AS vector_distance]",
+            "{}=>[KNN {} @{} $vector AS vector_distance",
             base, self.num_results, self.vector_field_name
         );
-        if let Some(ef_runtime) = self.ef_runtime {
-            query.push_str(&format!(" EF_RUNTIME {}", ef_runtime));
+        if self.ef_runtime.is_some() {
+            query.push_str(" EF_RUNTIME $EF");
+        }
+        if self.epsilon.is_some() {
+            query.push_str(" EPSILON $EPSILON");
+        }
+        if self.search_window_size.is_some() {
+            query.push_str(" SEARCH_WINDOW_SIZE $SEARCH_WINDOW_SIZE");
+        }
+        if self.use_search_history.is_some() {
+            query.push_str(" USE_SEARCH_HISTORY $USE_SEARCH_HISTORY");
+        }
+        if self.search_buffer_capacity.is_some() {
+            query.push_str(" SEARCH_BUFFER_CAPACITY $SEARCH_BUFFER_CAPACITY");
+        }
+        query.push(']');
+        if let Some(policy) = &self.hybrid_policy {
+            query.push_str(&format!(" HYBRID_POLICY {}", policy.as_str()));
+            if let Some(batch_size) = self.batch_size {
+                query.push_str(&format!(" BATCH_SIZE {}", batch_size));
+            }
         }
         query
     }
 
     fn params(&self) -> Vec<QueryParam> {
-        vec![QueryParam {
+        let mut params = vec![QueryParam {
             name: "vector".to_owned(),
             value: QueryParamValue::Binary(self.vector.to_bytes().to_vec()),
-        }]
+        }];
+        if let Some(ef_runtime) = self.ef_runtime {
+            params.push(QueryParam {
+                name: "EF".to_owned(),
+                value: QueryParamValue::String(ef_runtime.to_string()),
+            });
+        }
+        if let Some(epsilon) = self.epsilon {
+            params.push(QueryParam {
+                name: "EPSILON".to_owned(),
+                value: QueryParamValue::String(epsilon.to_string()),
+            });
+        }
+        if let Some(size) = self.search_window_size {
+            params.push(QueryParam {
+                name: "SEARCH_WINDOW_SIZE".to_owned(),
+                value: QueryParamValue::String(size.to_string()),
+            });
+        }
+        if let Some(mode) = &self.use_search_history {
+            params.push(QueryParam {
+                name: "USE_SEARCH_HISTORY".to_owned(),
+                value: QueryParamValue::String(mode.as_str().to_owned()),
+            });
+        }
+        if let Some(capacity) = self.search_buffer_capacity {
+            params.push(QueryParam {
+                name: "SEARCH_BUFFER_CAPACITY".to_owned(),
+                value: QueryParamValue::String(capacity.to_string()),
+            });
+        }
+        params
     }
 
     fn return_fields(&self) -> Vec<String> {
@@ -379,6 +588,12 @@ pub struct VectorRangeQuery<'a> {
     vector_field_name: String,
     distance_threshold: f32,
     filter_expression: Option<FilterExpression>,
+    epsilon: Option<f64>,
+    hybrid_policy: Option<HybridPolicy>,
+    batch_size: Option<usize>,
+    search_window_size: Option<usize>,
+    use_search_history: Option<SearchHistoryMode>,
+    search_buffer_capacity: Option<usize>,
     options: QueryOptions,
 }
 
@@ -401,6 +616,12 @@ impl<'a> VectorRangeQuery<'a> {
             vector_field_name: vector_field_name.into(),
             distance_threshold,
             filter_expression: None,
+            epsilon: None,
+            hybrid_policy: None,
+            batch_size: None,
+            search_window_size: None,
+            use_search_history: None,
+            search_buffer_capacity: None,
             options,
         }
     }
@@ -424,6 +645,102 @@ impl<'a> VectorRangeQuery<'a> {
     /// Updates the distance threshold in place.
     pub fn set_distance_threshold(&mut self, distance_threshold: f32) {
         self.distance_threshold = distance_threshold;
+    }
+
+    /// Sets the epsilon parameter for approximate range search.
+    pub fn with_epsilon(mut self, epsilon: f64) -> Self {
+        self.epsilon = Some(epsilon);
+        self
+    }
+
+    /// Replaces the epsilon parameter in place.
+    pub fn set_epsilon(&mut self, epsilon: f64) {
+        self.epsilon = Some(epsilon);
+    }
+
+    /// Returns the current epsilon setting.
+    pub fn epsilon(&self) -> Option<f64> {
+        self.epsilon
+    }
+
+    /// Sets the hybrid search policy.
+    pub fn with_hybrid_policy(mut self, policy: HybridPolicy) -> Self {
+        self.hybrid_policy = Some(policy);
+        self
+    }
+
+    /// Replaces the hybrid search policy in place.
+    pub fn set_hybrid_policy(&mut self, policy: HybridPolicy) {
+        self.hybrid_policy = Some(policy);
+    }
+
+    /// Returns the current hybrid policy setting.
+    pub fn hybrid_policy(&self) -> Option<HybridPolicy> {
+        self.hybrid_policy
+    }
+
+    /// Sets the batch size for `BATCHES` hybrid search policy.
+    pub fn with_batch_size(mut self, batch_size: usize) -> Self {
+        self.batch_size = Some(batch_size);
+        self
+    }
+
+    /// Replaces the batch size in place.
+    pub fn set_batch_size(&mut self, batch_size: usize) {
+        self.batch_size = Some(batch_size);
+    }
+
+    /// Returns the current batch size setting.
+    pub fn batch_size(&self) -> Option<usize> {
+        self.batch_size
+    }
+
+    /// Sets the search window size (SVS-VAMANA indexes).
+    pub fn with_search_window_size(mut self, size: usize) -> Self {
+        self.search_window_size = Some(size);
+        self
+    }
+
+    /// Replaces the search window size in place.
+    pub fn set_search_window_size(&mut self, size: usize) {
+        self.search_window_size = Some(size);
+    }
+
+    /// Returns the current search window size setting.
+    pub fn search_window_size(&self) -> Option<usize> {
+        self.search_window_size
+    }
+
+    /// Sets the search history mode (SVS-VAMANA indexes).
+    pub fn with_use_search_history(mut self, mode: SearchHistoryMode) -> Self {
+        self.use_search_history = Some(mode);
+        self
+    }
+
+    /// Replaces the search history mode in place.
+    pub fn set_use_search_history(&mut self, mode: SearchHistoryMode) {
+        self.use_search_history = Some(mode);
+    }
+
+    /// Returns the current search history mode.
+    pub fn use_search_history(&self) -> Option<SearchHistoryMode> {
+        self.use_search_history
+    }
+
+    /// Sets the search buffer capacity (SVS-VAMANA indexes).
+    pub fn with_search_buffer_capacity(mut self, capacity: usize) -> Self {
+        self.search_buffer_capacity = Some(capacity);
+        self
+    }
+
+    /// Replaces the search buffer capacity in place.
+    pub fn set_search_buffer_capacity(&mut self, capacity: usize) {
+        self.search_buffer_capacity = Some(capacity);
+    }
+
+    /// Returns the current search buffer capacity.
+    pub fn search_buffer_capacity(&self) -> Option<usize> {
+        self.search_buffer_capacity
     }
 
     /// Replaces the return field list.
@@ -485,17 +802,52 @@ impl QueryString for VectorRangeQuery<'_> {
             .filter_expression
             .as_ref()
             .map_or_else(|| "*".to_owned(), FilterExpression::to_redis_syntax);
-        format!(
-            "@{}:[VECTOR_RANGE {} $vector] {}",
-            self.vector_field_name, self.distance_threshold, base
-        )
+        let mut query = format!(
+            "@{}:[VECTOR_RANGE $distance_threshold $vector",
+            self.vector_field_name
+        );
+        // SVS-VAMANA and epsilon params are embedded in the query string as
+        // `$PARAM: value` (following upstream Python behaviour).
+        if let Some(epsilon) = self.epsilon {
+            query.push_str(&format!(" $EPSILON: {}", epsilon));
+        }
+        if let Some(size) = self.search_window_size {
+            query.push_str(&format!(" $SEARCH_WINDOW_SIZE: {}", size));
+        }
+        if let Some(mode) = &self.use_search_history {
+            query.push_str(&format!(" $USE_SEARCH_HISTORY: {}", mode.as_str()));
+        }
+        if let Some(capacity) = self.search_buffer_capacity {
+            query.push_str(&format!(" $SEARCH_BUFFER_CAPACITY: {}", capacity));
+        }
+        query.push_str(&format!(" $YIELD_DISTANCE_AS: vector_distance] {}", base));
+        query
     }
 
     fn params(&self) -> Vec<QueryParam> {
-        vec![QueryParam {
-            name: "vector".to_owned(),
-            value: QueryParamValue::Binary(self.vector.to_bytes().to_vec()),
-        }]
+        let mut params = vec![
+            QueryParam {
+                name: "vector".to_owned(),
+                value: QueryParamValue::Binary(self.vector.to_bytes().to_vec()),
+            },
+            QueryParam {
+                name: "distance_threshold".to_owned(),
+                value: QueryParamValue::String(self.distance_threshold.to_string()),
+            },
+        ];
+        if let Some(policy) = &self.hybrid_policy {
+            params.push(QueryParam {
+                name: "HYBRID_POLICY".to_owned(),
+                value: QueryParamValue::String(policy.as_str().to_owned()),
+            });
+        }
+        if let Some(batch_size) = self.batch_size {
+            params.push(QueryParam {
+                name: "BATCH_SIZE".to_owned(),
+                value: QueryParamValue::String(batch_size.to_string()),
+            });
+        }
+        params
     }
 
     fn return_fields(&self) -> Vec<String> {
@@ -530,6 +882,8 @@ impl PageableQuery for VectorRangeQuery<'_> {
 pub struct TextQuery {
     text: String,
     text_field_name: Option<String>,
+    filter_expression: Option<FilterExpression>,
+    return_score: bool,
     options: QueryOptions,
 }
 
@@ -539,6 +893,8 @@ impl TextQuery {
         Self {
             text: text.into(),
             text_field_name: None,
+            filter_expression: None,
+            return_score: true,
             options: QueryOptions::with_num_results(10),
         }
     }
@@ -546,6 +902,23 @@ impl TextQuery {
     /// Restricts the query to a specific text field.
     pub fn for_field(mut self, text_field_name: impl Into<String>) -> Self {
         self.text_field_name = Some(text_field_name.into());
+        self
+    }
+
+    /// Attaches a filter expression to combine with the text search.
+    pub fn with_filter(mut self, filter_expression: FilterExpression) -> Self {
+        self.filter_expression = Some(filter_expression);
+        self
+    }
+
+    /// Replaces the filter expression in place.
+    pub fn set_filter(&mut self, filter_expression: FilterExpression) {
+        self.filter_expression = Some(filter_expression);
+    }
+
+    /// Sets whether to return scores (default: `true`).
+    pub fn with_return_score(mut self, return_score: bool) -> Self {
+        self.return_score = return_score;
         self
     }
 
@@ -595,9 +968,20 @@ impl TextQuery {
 
 impl QueryString for TextQuery {
     fn to_redis_query(&self) -> String {
-        match &self.text_field_name {
+        let text_part = match &self.text_field_name {
             Some(field) => format!("@{}:({})", field, self.text),
             None => self.text.clone(),
+        };
+        match &self.filter_expression {
+            Some(filter) => {
+                let filter_str = filter.to_redis_syntax();
+                if filter_str == "*" {
+                    text_part
+                } else {
+                    format!("{} AND {}", text_part, filter_str)
+                }
+            }
+            None => text_part,
         }
     }
 
@@ -1680,9 +2064,9 @@ pub use sql::{SQLQuery, SqlParam};
 #[cfg(test)]
 mod tests {
     use super::{
-        AggregateHybridQuery, CountQuery, FilterQuery, HybridCombinationMethod, HybridQuery,
-        MultiVectorQuery, PageableQuery, QueryString, SortDirection, TextQuery, Vector,
-        VectorDtype, VectorInput, VectorQuery, VectorRangeQuery,
+        AggregateHybridQuery, CountQuery, FilterQuery, HybridCombinationMethod, HybridPolicy,
+        HybridQuery, MultiVectorQuery, PageableQuery, QueryString, SearchHistoryMode,
+        SortDirection, TextQuery, Vector, VectorDtype, VectorInput, VectorQuery, VectorRangeQuery,
     };
     use crate::filter::{Num, Tag, Text};
 
@@ -1867,7 +2251,10 @@ mod tests {
             .with_return_fields(["field1"])
             .render();
 
-        assert_eq!(render.params.len(), 1);
+        // params: vector + distance_threshold
+        assert_eq!(render.params.len(), 2);
+        assert_eq!(render.params[0].name, "vector");
+        assert_eq!(render.params[1].name, "distance_threshold");
         assert_eq!(render.return_fields, vec!["field1", "vector_distance"]);
     }
 
@@ -1879,7 +2266,11 @@ mod tests {
         query.set_distance_threshold(0.1);
 
         assert_eq!(query.distance_threshold(), 0.1);
-        assert!(query.to_redis_query().contains("VECTOR_RANGE 0.1"));
+        assert!(
+            query
+                .to_redis_query()
+                .contains("VECTOR_RANGE $distance_threshold")
+        );
     }
 
     #[test]
@@ -2502,5 +2893,315 @@ mod tests {
         assert!(cmd_str.contains("FILTER"));
         assert!(cmd_str.contains("@job"));
         assert!(cmd_str.contains("engineer"));
+    }
+
+    // ── VectorQuery runtime params parity tests ──
+
+    #[test]
+    fn vector_query_hybrid_policy_like_python_test_query_types() {
+        let query = VectorQuery::new(Vector::new(vec![0.1, 0.2, 0.3, 0.4]), "vector_field", 10)
+            .with_hybrid_policy(HybridPolicy::Batches);
+
+        assert_eq!(query.hybrid_policy(), Some(HybridPolicy::Batches));
+        assert!(query.to_redis_query().contains("HYBRID_POLICY BATCHES"));
+    }
+
+    #[test]
+    fn vector_query_hybrid_policy_with_batch_size_like_python() {
+        let query = VectorQuery::new(Vector::new(vec![0.1, 0.2, 0.3, 0.4]), "vector_field", 10)
+            .with_hybrid_policy(HybridPolicy::Batches)
+            .with_batch_size(50);
+
+        let qs = query.to_redis_query();
+        assert!(qs.contains("HYBRID_POLICY BATCHES BATCH_SIZE 50"));
+    }
+
+    #[test]
+    fn vector_query_adhoc_bf_policy_like_python() {
+        let query = VectorQuery::new(Vector::new(vec![0.1, 0.2, 0.3, 0.4]), "vector_field", 10)
+            .with_hybrid_policy(HybridPolicy::AdhocBf);
+
+        assert!(query.to_redis_query().contains("HYBRID_POLICY ADHOC_BF"));
+    }
+
+    #[test]
+    fn vector_query_epsilon_like_python_test_query_types() {
+        let query = VectorQuery::new(Vector::new(vec![0.1, 0.2, 0.3, 0.4]), "vector_field", 10)
+            .with_epsilon(0.05);
+
+        assert_eq!(query.epsilon(), Some(0.05));
+        let qs = query.to_redis_query();
+        assert!(qs.contains("EPSILON $EPSILON"));
+        let params = query.params();
+        assert!(params.iter().any(|p| p.name == "EPSILON"));
+    }
+
+    #[test]
+    fn vector_query_ef_runtime_params_like_python_test_query_types() {
+        let query = VectorQuery::new(Vector::new(vec![0.1, 0.2, 0.3, 0.4]), "vector_field", 10)
+            .with_ef_runtime(100);
+
+        assert_eq!(query.ef_runtime(), Some(100));
+        let qs = query.to_redis_query();
+        assert!(qs.contains("EF_RUNTIME $EF"));
+        let params = query.params();
+        assert!(params.iter().any(|p| p.name == "EF"));
+    }
+
+    #[test]
+    fn vector_query_search_window_size_like_python() {
+        let query = VectorQuery::new(Vector::new(vec![0.1, 0.2, 0.3, 0.4]), "vector_field", 10)
+            .with_search_window_size(40);
+
+        assert_eq!(query.search_window_size(), Some(40));
+        let qs = query.to_redis_query();
+        assert!(qs.contains("SEARCH_WINDOW_SIZE $SEARCH_WINDOW_SIZE"));
+    }
+
+    #[test]
+    fn vector_query_use_search_history_like_python() {
+        for mode in [
+            SearchHistoryMode::Off,
+            SearchHistoryMode::On,
+            SearchHistoryMode::Auto,
+        ] {
+            let query = VectorQuery::new(Vector::new(vec![0.1, 0.2, 0.3, 0.4]), "vector_field", 10)
+                .with_use_search_history(mode);
+
+            assert_eq!(query.use_search_history(), Some(mode));
+            let qs = query.to_redis_query();
+            assert!(qs.contains("USE_SEARCH_HISTORY $USE_SEARCH_HISTORY"));
+        }
+    }
+
+    #[test]
+    fn vector_query_search_buffer_capacity_like_python() {
+        let query = VectorQuery::new(Vector::new(vec![0.1, 0.2, 0.3, 0.4]), "vector_field", 10)
+            .with_search_buffer_capacity(50);
+
+        assert_eq!(query.search_buffer_capacity(), Some(50));
+        let qs = query.to_redis_query();
+        assert!(qs.contains("SEARCH_BUFFER_CAPACITY $SEARCH_BUFFER_CAPACITY"));
+    }
+
+    #[test]
+    fn vector_query_all_runtime_params_like_python() {
+        let query = VectorQuery::new(Vector::new(vec![0.1, 0.2, 0.3, 0.4]), "vector_field", 10)
+            .with_ef_runtime(100)
+            .with_epsilon(0.05)
+            .with_search_window_size(40)
+            .with_use_search_history(SearchHistoryMode::On)
+            .with_search_buffer_capacity(50);
+
+        let qs = query.to_redis_query();
+        assert!(qs.contains("EF_RUNTIME $EF"));
+        assert!(qs.contains("EPSILON $EPSILON"));
+        assert!(qs.contains("SEARCH_WINDOW_SIZE $SEARCH_WINDOW_SIZE"));
+        assert!(qs.contains("USE_SEARCH_HISTORY $USE_SEARCH_HISTORY"));
+        assert!(qs.contains("SEARCH_BUFFER_CAPACITY $SEARCH_BUFFER_CAPACITY"));
+
+        let params = query.params();
+        assert!(params.iter().any(|p| p.name == "EF"));
+        assert!(params.iter().any(|p| p.name == "EPSILON"));
+        assert!(params.iter().any(|p| p.name == "SEARCH_WINDOW_SIZE"));
+        assert!(params.iter().any(|p| p.name == "USE_SEARCH_HISTORY"));
+        assert!(params.iter().any(|p| p.name == "SEARCH_BUFFER_CAPACITY"));
+    }
+
+    #[test]
+    fn vector_query_set_methods_like_python() {
+        let mut query = VectorQuery::new(Vector::new(vec![0.1, 0.2, 0.3, 0.4]), "vector_field", 10);
+
+        assert!(query.ef_runtime().is_none());
+        assert!(query.epsilon().is_none());
+        assert!(query.hybrid_policy().is_none());
+
+        query.set_ef_runtime(200);
+        assert_eq!(query.ef_runtime(), Some(200));
+
+        query.set_epsilon(0.1);
+        assert_eq!(query.epsilon(), Some(0.1));
+
+        query.set_hybrid_policy(HybridPolicy::Batches);
+        assert_eq!(query.hybrid_policy(), Some(HybridPolicy::Batches));
+
+        query.set_batch_size(100);
+        assert_eq!(query.batch_size(), Some(100));
+    }
+
+    // ── VectorRangeQuery runtime params parity tests ──
+
+    #[test]
+    fn range_query_epsilon_like_python_test_query_types() {
+        let query =
+            VectorRangeQuery::new(Vector::new(vec![0.1, 0.2, 0.3, 0.4]), "vector_field", 0.3)
+                .with_epsilon(0.05);
+
+        assert_eq!(query.epsilon(), Some(0.05));
+        let qs = query.to_redis_query();
+        assert!(qs.contains("$EPSILON: 0.05"));
+    }
+
+    #[test]
+    fn range_query_construction_like_python() {
+        // Basic range query
+        let basic = VectorRangeQuery::new(Vector::new(vec![0.1, 0.1, 0.5]), "user_embedding", 0.2)
+            .with_return_fields(["user", "credit_score"]);
+
+        let qs = basic.to_redis_query();
+        assert!(qs.contains("VECTOR_RANGE $distance_threshold $vector"));
+        assert!(qs.contains("$YIELD_DISTANCE_AS: vector_distance"));
+        assert!(!qs.contains("HYBRID_POLICY"));
+
+        // Range query with epsilon
+        let epsilon_query =
+            VectorRangeQuery::new(Vector::new(vec![0.1, 0.1, 0.5]), "user_embedding", 0.2)
+                .with_epsilon(0.05);
+
+        let qs = epsilon_query.to_redis_query();
+        assert!(qs.contains("$EPSILON: 0.05"));
+        assert_eq!(epsilon_query.epsilon(), Some(0.05));
+    }
+
+    #[test]
+    fn range_query_hybrid_policy_in_params_not_query_string_like_python() {
+        let query = VectorRangeQuery::new(Vector::new(vec![0.1, 0.1, 0.5]), "user_embedding", 0.2)
+            .with_hybrid_policy(HybridPolicy::Batches);
+
+        let qs = query.to_redis_query();
+        // Hybrid policy should NOT be in the query string for range queries
+        assert!(!qs.contains("HYBRID_POLICY"));
+        assert_eq!(query.hybrid_policy(), Some(HybridPolicy::Batches));
+
+        let params = query.params();
+        assert!(params.iter().any(|p| p.name == "HYBRID_POLICY"));
+    }
+
+    #[test]
+    fn range_query_hybrid_policy_with_batch_size_in_params_like_python() {
+        let query = VectorRangeQuery::new(Vector::new(vec![0.1, 0.1, 0.5]), "user_embedding", 0.2)
+            .with_hybrid_policy(HybridPolicy::Batches)
+            .with_batch_size(50);
+
+        let qs = query.to_redis_query();
+        assert!(!qs.contains("HYBRID_POLICY"));
+        assert!(!qs.contains("BATCH_SIZE"));
+
+        let params = query.params();
+        assert!(params.iter().any(|p| p.name == "HYBRID_POLICY"));
+        assert!(params.iter().any(|p| p.name == "BATCH_SIZE"));
+    }
+
+    #[test]
+    fn range_query_setter_methods_like_python() {
+        let mut query =
+            VectorRangeQuery::new(Vector::new(vec![0.1, 0.2, 0.3, 0.4]), "user_embedding", 0.2);
+
+        assert!(query.epsilon().is_none());
+        assert!(query.hybrid_policy().is_none());
+        assert!(query.batch_size().is_none());
+
+        query.set_epsilon(0.1);
+        assert_eq!(query.epsilon(), Some(0.1));
+        assert!(query.to_redis_query().contains("$EPSILON: 0.1"));
+
+        query.set_hybrid_policy(HybridPolicy::Batches);
+        assert_eq!(query.hybrid_policy(), Some(HybridPolicy::Batches));
+
+        query.set_batch_size(25);
+        assert_eq!(query.batch_size(), Some(25));
+    }
+
+    #[test]
+    fn range_query_search_window_size_like_python() {
+        let query =
+            VectorRangeQuery::new(Vector::new(vec![0.1, 0.2, 0.3, 0.4]), "vector_field", 0.3)
+                .with_search_window_size(40);
+
+        assert_eq!(query.search_window_size(), Some(40));
+        assert!(query.to_redis_query().contains("$SEARCH_WINDOW_SIZE: 40"));
+    }
+
+    #[test]
+    fn range_query_use_search_history_like_python() {
+        for (mode, expected_str) in [
+            (SearchHistoryMode::Off, "OFF"),
+            (SearchHistoryMode::On, "ON"),
+            (SearchHistoryMode::Auto, "AUTO"),
+        ] {
+            let query =
+                VectorRangeQuery::new(Vector::new(vec![0.1, 0.2, 0.3, 0.4]), "vector_field", 0.3)
+                    .with_use_search_history(mode);
+
+            assert_eq!(query.use_search_history(), Some(mode));
+            let qs = query.to_redis_query();
+            assert!(
+                qs.contains(&format!("$USE_SEARCH_HISTORY: {}", expected_str)),
+                "query string should contain USE_SEARCH_HISTORY for {:?}",
+                mode,
+            );
+        }
+    }
+
+    #[test]
+    fn range_query_search_buffer_capacity_like_python() {
+        let query =
+            VectorRangeQuery::new(Vector::new(vec![0.1, 0.2, 0.3, 0.4]), "vector_field", 0.3)
+                .with_search_buffer_capacity(50);
+
+        assert_eq!(query.search_buffer_capacity(), Some(50));
+        assert!(
+            query
+                .to_redis_query()
+                .contains("$SEARCH_BUFFER_CAPACITY: 50")
+        );
+    }
+
+    #[test]
+    fn range_query_all_svs_params_like_python() {
+        let query =
+            VectorRangeQuery::new(Vector::new(vec![0.1, 0.2, 0.3, 0.4]), "vector_field", 0.3)
+                .with_epsilon(0.05)
+                .with_search_window_size(40)
+                .with_use_search_history(SearchHistoryMode::On)
+                .with_search_buffer_capacity(50);
+
+        let qs = query.to_redis_query();
+        assert!(qs.contains("$EPSILON: 0.05"));
+        assert!(qs.contains("$SEARCH_WINDOW_SIZE: 40"));
+        assert!(qs.contains("$USE_SEARCH_HISTORY: ON"));
+        assert!(qs.contains("$SEARCH_BUFFER_CAPACITY: 50"));
+    }
+
+    // ── TextQuery filter_expression parity tests ──
+
+    #[test]
+    fn text_query_with_filter_expression_like_python() {
+        let filter = Tag::new("genre").eq("comedy");
+        let query = TextQuery::new("basketball")
+            .for_field("description")
+            .with_filter(filter);
+
+        let qs = query.to_redis_query();
+        assert!(qs.contains("@description:(basketball)"));
+        assert!(qs.contains("AND @genre:{comedy}"));
+    }
+
+    #[test]
+    fn text_query_without_filter_like_python() {
+        let query = TextQuery::new("basketball").for_field("description");
+
+        let qs = query.to_redis_query();
+        assert!(qs.contains("@description:(basketball)"));
+        assert!(!qs.contains("AND"));
+    }
+
+    #[test]
+    fn text_query_set_filter_like_python() {
+        let mut query = TextQuery::new("basketball").for_field("description");
+        query.set_filter(Tag::new("category").eq("sports"));
+
+        let qs = query.to_redis_query();
+        assert!(qs.contains("AND @category:{sports}"));
     }
 }

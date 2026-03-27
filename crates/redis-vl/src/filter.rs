@@ -98,6 +98,11 @@ pub enum FilterExpression {
     Or(Box<FilterExpression>, Box<FilterExpression>),
     /// Logical NOT.
     Not(Box<FilterExpression>),
+    /// IsMissing predicate – matches documents where a field is absent.
+    IsMissing {
+        /// Field name.
+        field: String,
+    },
 }
 
 impl FilterExpression {
@@ -140,6 +145,7 @@ impl FilterExpression {
                 format!("({} | {})", left.to_redis_syntax(), right.to_redis_syntax())
             }
             Self::Not(inner) => format!("(-{})", inner.to_redis_syntax()),
+            Self::IsMissing { field } => format!("ismissing(@{})", field),
         }
     }
 
@@ -271,6 +277,11 @@ impl Tag {
     pub fn ne(self, value: impl Into<String>) -> FilterExpression {
         !self.eq(value)
     }
+
+    /// Matches documents where this tag field is absent.
+    pub fn is_missing(self) -> FilterExpression {
+        FilterExpression::IsMissing { field: self.field }
+    }
 }
 
 /// Builder for text predicates.
@@ -326,6 +337,11 @@ impl Text {
     /// Alias for `like`.
     pub fn matches(self, value: impl Into<String>) -> FilterExpression {
         self.like(value)
+    }
+
+    /// Matches documents where this text field is absent.
+    pub fn is_missing(self) -> FilterExpression {
+        FilterExpression::IsMissing { field: self.field }
     }
 }
 
@@ -397,6 +413,11 @@ impl Num {
         };
         range_expr(self.field, min, max)
     }
+
+    /// Matches documents where this numeric field is absent.
+    pub fn is_missing(self) -> FilterExpression {
+        FilterExpression::IsMissing { field: self.field }
+    }
 }
 
 /// Builder for geo predicates.
@@ -432,6 +453,11 @@ impl Geo {
     /// Alias for `eq`.
     pub fn within_radius(self, radius: GeoRadius) -> FilterExpression {
         self.eq(radius)
+    }
+
+    /// Matches documents where this geo field is absent.
+    pub fn is_missing(self) -> FilterExpression {
+        FilterExpression::IsMissing { field: self.field }
     }
 }
 
@@ -568,6 +594,11 @@ impl Timestamp {
             min,
             max,
         }
+    }
+
+    /// Matches documents where this timestamp field is absent.
+    pub fn is_missing(self) -> FilterExpression {
+        FilterExpression::IsMissing { field: self.field }
     }
 }
 
@@ -831,6 +862,49 @@ mod tests {
                 start.timestamp() as f64,
                 end.timestamp() as f64
             )
+        );
+    }
+
+    // ── IsMissing parity tests (upstream: test_filter.py) ──
+
+    #[test]
+    fn tag_is_missing_like_python_test_filter() {
+        let expr = Tag::new("brand").is_missing();
+        assert_eq!(expr.to_redis_syntax(), "ismissing(@brand)");
+    }
+
+    #[test]
+    fn text_is_missing_like_python_test_filter() {
+        let expr = Text::new("description").is_missing();
+        assert_eq!(expr.to_redis_syntax(), "ismissing(@description)");
+    }
+
+    #[test]
+    fn num_is_missing_like_python_test_filter() {
+        let expr = Num::new("price").is_missing();
+        assert_eq!(expr.to_redis_syntax(), "ismissing(@price)");
+    }
+
+    #[test]
+    fn geo_is_missing_like_python_test_filter() {
+        let expr = Geo::new("location").is_missing();
+        assert_eq!(expr.to_redis_syntax(), "ismissing(@location)");
+    }
+
+    #[test]
+    fn timestamp_is_missing_like_python_test_filter() {
+        let expr = Timestamp::new("created_at").is_missing();
+        assert_eq!(expr.to_redis_syntax(), "ismissing(@created_at)");
+    }
+
+    #[test]
+    fn is_missing_combined_with_other_filters_like_python() {
+        let missing = Tag::new("brand").is_missing();
+        let price_filter = Num::new("price").gte(10.0);
+        let combined = missing & price_filter;
+        assert_eq!(
+            combined.to_redis_syntax(),
+            "(ismissing(@brand) @price:[10 +inf])"
         );
     }
 }
