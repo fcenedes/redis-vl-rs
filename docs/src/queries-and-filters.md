@@ -54,7 +54,8 @@ let vector = Vector::new(&[0.1_f32; 128] as &[f32]);
 let query = VectorQuery::new(vector, "embedding", 5);
 let result = index.search(&query).unwrap();
 
-for doc in result.as_documents().unwrap_or(&[]) {
+println!("Found {} documents", result.total);
+for doc in &result.docs {
     println!("{:?}", doc);
 }
 ```

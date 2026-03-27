@@ -1,7 +1,10 @@
 //! Criterion benchmarks for core `redis-vl` operations that don't require a
 //! Redis connection: schema parsing, filter rendering, and query building.
+#![allow(missing_docs)]
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use std::hint::black_box;
+
+use criterion::{Criterion, criterion_group, criterion_main};
 use redis_vl::{
     BetweenInclusivity, IndexSchema, Vector, VectorQuery,
     filter::{Num, Tag, Text},
