@@ -9,6 +9,9 @@ documentation.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 description = "CLI for the Rust Redis Vector Library"
+readme = "../../README.md"
+keywords = ["redis", "vector-search", "cli"]
+categories = ["command-line-utilities", "database"]
 
 [dependencies]
 anstream.workspace = true

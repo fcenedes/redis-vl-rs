@@ -47,3 +47,10 @@ rerankers = []
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+criterion = { version = "0.7.0", features = ["html_reports"] }
+
+[[bench]]
+name = "core_benchmarks"
+harness = false
