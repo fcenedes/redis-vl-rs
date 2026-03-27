@@ -320,6 +320,200 @@ impl SemanticRouter {
         self.index.delete(true)
     }
 
+    /// Adds new references to an existing route and loads them into Redis.
+    ///
+    /// Returns the list of Redis keys created for the added references.
+    pub fn add_route_references(
+        &mut self,
+        route_name: &str,
+        references: &[String],
+    ) -> Result<Vec<String>> {
+        if references.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Validate route exists before doing any work
+        if self.get(route_name).is_none() {
+            return Err(crate::Error::InvalidInput(format!(
+                "Route '{route_name}' not found in the SemanticRouter"
+            )));
+        }
+
+        let refs_str: Vec<&str> = references.iter().map(String::as_str).collect();
+        let embeddings = self.vectorizer.embed_many(&refs_str)?;
+        let mut records = Vec::with_capacity(references.len());
+        let mut keys = Vec::with_capacity(references.len());
+
+        for (reference, embedding) in references.iter().zip(embeddings) {
+            if embedding.len() != self.vector_dimensions {
+                return Err(crate::Error::InvalidInput(format!(
+                    "router vector dimensions mismatch: expected {}, got {}",
+                    self.vector_dimensions,
+                    embedding.len()
+                )));
+            }
+            let ref_id = route_reference_id(route_name, reference);
+            keys.push(self.index.key(&ref_id));
+            records.push(json!({
+                ROUTER_REFERENCE_ID_FIELD: ref_id,
+                ROUTER_ROUTE_NAME_FIELD: route_name,
+                ROUTER_REFERENCE_FIELD: reference,
+                ROUTER_VECTOR_FIELD: embedding,
+            }));
+        }
+
+        if !records.is_empty() {
+            let _: Vec<String> = self.index.load(&records, ROUTER_REFERENCE_ID_FIELD, None)?;
+        }
+
+        // Update the in-memory route with the new references
+        if let Some(route) = self.routes.iter_mut().find(|r| r.name == route_name) {
+            route.references.extend(references.iter().cloned());
+        }
+
+        Ok(keys)
+    }
+
+    /// Retrieves reference metadata for a route by name or by specific reference IDs.
+    ///
+    /// At least one of `route_name` or `reference_ids` must be provided.
+    pub fn get_route_references(
+        &self,
+        route_name: Option<&str>,
+        reference_ids: Option<&[String]>,
+    ) -> Result<Vec<Map<String, Value>>> {
+        let ids_to_query: Vec<String> = if let Some(ref_ids) = reference_ids {
+            ref_ids.to_vec()
+        } else if let Some(route_name) = route_name {
+            let pattern = self.route_pattern(route_name);
+            let scanned = self.scan_keys(&pattern)?;
+            let sep = self.index.key_separator();
+            let prefix = self.index.prefix();
+            let prefix_with_sep = if prefix.ends_with(sep) {
+                prefix.to_owned()
+            } else {
+                format!("{prefix}{sep}")
+            };
+            // Strip the prefix to recover the reference_id ("route_name:hash")
+            scanned
+                .into_iter()
+                .map(|key| {
+                    key.strip_prefix(&prefix_with_sep)
+                        .unwrap_or(&key)
+                        .to_owned()
+                })
+                .collect()
+        } else {
+            return Err(crate::Error::InvalidInput(
+                "Must provide a route name, reference ids, or keys to get references".to_owned(),
+            ));
+        };
+
+        let queries: Vec<crate::query::FilterQuery> = ids_to_query
+            .iter()
+            .map(|id| {
+                let filter = crate::filter::Tag::new(ROUTER_REFERENCE_ID_FIELD).eq(id.as_str());
+                crate::query::FilterQuery::new(filter).with_return_fields([
+                    ROUTER_REFERENCE_ID_FIELD,
+                    ROUTER_ROUTE_NAME_FIELD,
+                    ROUTER_REFERENCE_FIELD,
+                ])
+            })
+            .collect();
+
+        let results = self.index.batch_query(queries.iter())?;
+        let mut refs = Vec::new();
+        for result in results {
+            if let QueryOutput::Documents(docs) = result {
+                for doc in docs {
+                    refs.push(doc);
+                }
+            }
+        }
+        Ok(refs)
+    }
+
+    /// Deletes route references by route name, reference IDs, or explicit keys.
+    ///
+    /// Returns the number of references deleted.
+    pub fn delete_route_references(
+        &mut self,
+        route_name: Option<&str>,
+        reference_ids: Option<&[String]>,
+        keys: Option<&[String]>,
+    ) -> Result<usize> {
+        let keys_to_delete: Vec<String> = if let Some(explicit_keys) = keys {
+            explicit_keys.to_vec()
+        } else if let Some(ref_ids) = reference_ids {
+            // Query to find the full keys for these reference IDs
+            let queries: Vec<crate::query::FilterQuery> = ref_ids
+                .iter()
+                .map(|id| {
+                    let filter = crate::filter::Tag::new(ROUTER_REFERENCE_ID_FIELD).eq(id.as_str());
+                    crate::query::FilterQuery::new(filter).with_return_fields([
+                        ROUTER_REFERENCE_ID_FIELD,
+                        ROUTER_ROUTE_NAME_FIELD,
+                        ROUTER_REFERENCE_FIELD,
+                    ])
+                })
+                .collect();
+
+            let results = self.index.batch_query(queries.iter())?;
+            let mut found_keys = Vec::new();
+            for result in results {
+                if let QueryOutput::Documents(docs) = result {
+                    for doc in docs {
+                        // reference_id already contains "route_name:hash"
+                        // (produced by route_reference_id), so use it directly
+                        if let Some(ref_id) =
+                            doc.get(ROUTER_REFERENCE_ID_FIELD).and_then(Value::as_str)
+                        {
+                            found_keys.push(self.index.key(ref_id));
+                        }
+                    }
+                }
+            }
+            found_keys
+        } else if let Some(route_name) = route_name {
+            let pattern = self.route_pattern(route_name);
+            self.scan_keys(&pattern)?
+        } else {
+            return Err(crate::Error::InvalidInput(
+                "Must provide route_name, reference_ids, or keys to delete references".to_owned(),
+            ));
+        };
+
+        if keys_to_delete.is_empty() {
+            return Ok(0);
+        }
+
+        // Collect references to remove from in-memory routes before deleting
+        let sep = self.index.key_separator();
+        let prefix_raw = self.index.prefix().trim_end_matches(sep);
+        let prefix_with_sep = if prefix_raw.is_empty() {
+            String::new()
+        } else {
+            format!("{prefix_raw}{sep}")
+        };
+        for key in &keys_to_delete {
+            // Strip prefix+separator to recover the id for fetch
+            let id = key.strip_prefix(&prefix_with_sep).unwrap_or(key);
+            if let Ok(Some(Value::Object(doc))) = self.index.fetch(id) {
+                if let (Some(rname), Some(ref_text)) = (
+                    doc.get(ROUTER_ROUTE_NAME_FIELD).and_then(Value::as_str),
+                    doc.get(ROUTER_REFERENCE_FIELD).and_then(Value::as_str),
+                ) {
+                    if let Some(route) = self.routes.iter_mut().find(|r| r.name == rname) {
+                        route.references.retain(|r| r != ref_text);
+                    }
+                }
+            }
+        }
+
+        let deleted = self.index.drop_keys(&keys_to_delete)?;
+        Ok(deleted)
+    }
+
     /// Serializes the router to a JSON value.
     pub fn to_json_value(&self) -> Result<Value> {
         Ok(json!({
@@ -330,6 +524,40 @@ impl SemanticRouter {
                 "type": "custom"
             }
         }))
+    }
+
+    /// Scans Redis keys matching a glob pattern.
+    fn scan_keys(&self, pattern: &str) -> Result<Vec<String>> {
+        let client = self.connection.client()?;
+        let mut connection = client.get_connection()?;
+        let mut cursor = 0_u64;
+        let mut keys = Vec::new();
+        loop {
+            let (next_cursor, batch): (u64, Vec<String>) = redis::cmd("SCAN")
+                .arg(cursor)
+                .arg("MATCH")
+                .arg(pattern)
+                .arg("COUNT")
+                .arg(100)
+                .query(&mut connection)?;
+            keys.extend(batch);
+            if next_cursor == 0 {
+                break;
+            }
+            cursor = next_cursor;
+        }
+        Ok(keys)
+    }
+
+    /// Builds a scan pattern for a route's references.
+    fn route_pattern(&self, route_name: &str) -> String {
+        let sep = self.index.key_separator();
+        let prefix = self.index.prefix().trim_end_matches(sep);
+        if prefix.is_empty() {
+            format!("{route_name}{sep}*")
+        } else {
+            format!("{prefix}{sep}{route_name}{sep}*")
+        }
     }
 
     fn load_routes(&self) -> Result<()> {
