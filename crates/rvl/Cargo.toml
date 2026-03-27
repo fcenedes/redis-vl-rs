@@ -1,0 +1,20 @@
+[package]
+name = "rvl"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+documentation.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "CLI for the Rust Redis Vector Library"
+
+[dependencies]
+anstream.workspace = true
+clap.workspace = true
+comfy-table.workspace = true
+redis-vl = { path = "../redis-vl" }
+
+[lints]
+workspace = true
