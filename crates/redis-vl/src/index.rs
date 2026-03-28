@@ -1,4 +1,24 @@
 //! Search index lifecycle helpers and Redis transport adapters.
+//!
+//! [`SearchIndex`] provides blocking (sync) operations and
+//! [`AsyncSearchIndex`] provides Tokio-based async operations. Both manage
+//! the full index lifecycle: create, delete, load, fetch, search, query,
+//! batch operations, pagination, hybrid search, aggregate queries,
+//! multi-vector queries, and `from_existing` reconnection.
+//!
+//! # Example
+//!
+//! ```rust,no_run
+//! use redis_vl::{IndexSchema, SearchIndex, Vector, VectorQuery};
+//!
+//! let schema = IndexSchema::from_yaml_file("schema.yaml").unwrap();
+//! let index = SearchIndex::new(schema, "redis://127.0.0.1:6379");
+//! index.create().unwrap();
+//!
+//! let result = index.search(&VectorQuery::new(
+//!     Vector::new(&[0.1_f32; 128] as &[f32]), "embedding", 5
+//! )).unwrap();
+//! ```
 
 use std::collections::{HashMap, VecDeque};
 use std::ops::Index;
@@ -781,15 +801,25 @@ impl SearchIndex {
     /// This mirrors the Python `SearchIndex.query(SQLQuery(...))` behavior.
     #[cfg(feature = "sql")]
     pub fn sql_query(&self, query: &crate::query::SQLQuery) -> Result<QueryOutput> {
+        // Geo aggregate (geo_distance in SELECT) → FT.AGGREGATE.
+        if let Some(cmd) = query.build_geo_aggregate_cmd(self.name()) {
+            let client = self.connection.client()?;
+            let mut connection = client.get_connection()?;
+            let value: redis::Value = cmd.query(&mut connection)?;
+            let documents = parse_aggregate_result(value)?;
+            return Ok(QueryOutput::Documents(documents));
+        }
+        // Standard aggregate (COUNT, SUM, GROUP BY, etc.) → FT.AGGREGATE.
         if let Some(cmd) = query.build_aggregate_cmd(self.name()) {
             let client = self.connection.client()?;
             let mut connection = client.get_connection()?;
             let value: redis::Value = cmd.query(&mut connection)?;
             let documents = parse_aggregate_result(value)?;
-            Ok(QueryOutput::Documents(documents))
-        } else {
-            self.query(query)
+            return Ok(QueryOutput::Documents(documents));
         }
+        // Vector and geo WHERE queries use the regular FT.SEARCH path
+        // (QueryString implementation handles KNN + PARAMS / GEOFILTER).
+        self.query(query)
     }
 
     /// Executes a [`crate::query::MultiVectorQuery`] via `FT.AGGREGATE` and returns
@@ -884,6 +914,15 @@ impl SearchIndex {
 
         if let Some(limit) = render.limit {
             cmd.arg("LIMIT").arg(limit.offset).arg(limit.num);
+        }
+
+        if let Some(geofilter) = render.geofilter {
+            cmd.arg("GEOFILTER")
+                .arg(geofilter.field)
+                .arg(geofilter.lon)
+                .arg(geofilter.lat)
+                .arg(geofilter.radius)
+                .arg(geofilter.unit);
         }
 
         cmd.arg("DIALECT").arg(render.dialect);
@@ -1539,15 +1578,24 @@ impl AsyncSearchIndex {
     /// This mirrors the Python `AsyncSearchIndex.query(SQLQuery(...))` behavior.
     #[cfg(feature = "sql")]
     pub async fn sql_query(&self, query: &crate::query::SQLQuery) -> Result<QueryOutput> {
+        // Geo aggregate (geo_distance in SELECT) → FT.AGGREGATE.
+        if let Some(cmd) = query.build_geo_aggregate_cmd(self.name()) {
+            let client = self.connection.client()?;
+            let mut connection = client.get_multiplexed_async_connection().await?;
+            let value: redis::Value = cmd.query_async(&mut connection).await?;
+            let documents = parse_aggregate_result(value)?;
+            return Ok(QueryOutput::Documents(documents));
+        }
+        // Standard aggregate (COUNT, SUM, GROUP BY, etc.) → FT.AGGREGATE.
         if let Some(cmd) = query.build_aggregate_cmd(self.name()) {
             let client = self.connection.client()?;
             let mut connection = client.get_multiplexed_async_connection().await?;
             let value: redis::Value = cmd.query_async(&mut connection).await?;
             let documents = parse_aggregate_result(value)?;
-            Ok(QueryOutput::Documents(documents))
-        } else {
-            self.query(query).await
+            return Ok(QueryOutput::Documents(documents));
         }
+        // Vector and geo WHERE queries use the regular FT.SEARCH path.
+        self.query(query).await
     }
 
     /// Executes a [`crate::query::MultiVectorQuery`] asynchronously via `FT.AGGREGATE` and

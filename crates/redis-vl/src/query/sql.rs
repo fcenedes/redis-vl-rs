@@ -42,7 +42,7 @@
 
 use std::collections::HashMap;
 
-use super::{QueryLimit, QueryString, SortBy, SortDirection};
+use super::{QueryLimit, QueryParam, QueryParamValue, QueryString, SortBy, SortDirection};
 
 /// A typed SQL parameter value.
 #[derive(Debug, Clone)]
@@ -154,10 +154,48 @@ impl SQLQuery {
         let parsed = parse_aggregate(&self.substituted_sql())?;
         Some(parsed.build_cmd(index_name))
     }
+
+    /// Returns `true` if this SQL query contains vector search functions
+    /// (`vector_distance()` or `cosine_distance()`).
+    pub fn is_vector_query(&self) -> bool {
+        parse_vector_select(&self.substituted_sql(), &self.params).is_some()
+    }
+
+    /// Returns `true` if this SQL query contains `geo_distance()` in the
+    /// SELECT clause (which generates `FT.AGGREGATE` with `APPLY geodistance`).
+    pub fn is_geo_aggregate(&self) -> bool {
+        parse_geo_aggregate(&self.substituted_sql()).is_some()
+    }
+
+    /// Builds an `FT.AGGREGATE` command for geo_distance in SELECT.
+    ///
+    /// Returns `None` if the SQL doesn't have `geo_distance()` in SELECT.
+    pub fn build_geo_aggregate_cmd(&self, index_name: &str) -> Option<redis::Cmd> {
+        let parsed = parse_geo_aggregate(&self.substituted_sql())?;
+        Some(parsed.build_cmd(index_name))
+    }
+
+    /// Parses a vector SQL query for internal use by `QueryString`.
+    fn parsed_vector(&self) -> Option<ParsedVectorSelect> {
+        parse_vector_select(&self.substituted_sql(), &self.params)
+    }
+
+    /// Parses a geo WHERE filter for internal use by `QueryString`.
+    fn parsed_geo_where(&self) -> Option<ParsedGeoWhere> {
+        parse_geo_where(&self.substituted_sql())
+    }
 }
 
 impl QueryString for SQLQuery {
     fn to_redis_query(&self) -> String {
+        // Vector queries: generate KNN query string.
+        if let Some(ref vq) = self.parsed_vector() {
+            return vq.to_knn_query_string();
+        }
+        // Geo WHERE queries: generate filter + GEOFILTER handled separately.
+        if let Some(ref gw) = self.parsed_geo_where() {
+            return gw.filter_string();
+        }
         if let Some(parsed) = self.parsed() {
             parsed.filter_string()
         } else {
@@ -166,7 +204,21 @@ impl QueryString for SQLQuery {
         }
     }
 
+    fn params(&self) -> Vec<QueryParam> {
+        // Vector queries need binary vector params.
+        if let Some(ref vq) = self.parsed_vector() {
+            return vq.params();
+        }
+        Vec::new()
+    }
+
     fn return_fields(&self) -> Vec<String> {
+        if let Some(ref vq) = self.parsed_vector() {
+            return vq.return_fields.clone();
+        }
+        if let Some(ref gw) = self.parsed_geo_where() {
+            return gw.return_fields.clone();
+        }
         self.parsed().map(|p| p.return_fields).unwrap_or_default()
     }
 
@@ -175,6 +227,12 @@ impl QueryString for SQLQuery {
     }
 
     fn limit(&self) -> Option<QueryLimit> {
+        if let Some(ref vq) = self.parsed_vector() {
+            return Some(QueryLimit {
+                offset: 0,
+                num: vq.knn_num,
+            });
+        }
         self.parsed().and_then(|p| p.limit)
     }
 
@@ -183,6 +241,10 @@ impl QueryString for SQLQuery {
         self.parsed()
             .map(|p| p.return_fields.is_empty())
             .unwrap_or(false)
+    }
+
+    fn geofilter(&self) -> Option<super::GeoFilter> {
+        self.parsed_geo_where().map(|gw| gw.geofilter)
     }
 }
 
@@ -714,6 +776,637 @@ fn try_parse_aggregate_fn(tokens: &[String], pos: usize) -> Option<(AggReducer, 
     ))
 }
 
+// ---------------------------------------------------------------------------
+// Vector SQL parser → KNN FT.SEARCH command
+// ---------------------------------------------------------------------------
+
+/// Information about a vector function call in SELECT.
+#[derive(Debug, Clone)]
+struct VectorFuncCall {
+    /// The vector field name (e.g. `embedding`).
+    field: String,
+    /// The parameter name that holds the binary vector (e.g. `vec`).
+    param_name: String,
+    /// The output alias (e.g. `score`, `vector_distance`).
+    alias: String,
+}
+
+/// A parsed SQL SELECT with vector search function.
+#[derive(Debug, Clone)]
+struct ParsedVectorSelect {
+    /// The vector function call details.
+    vector_fn: VectorFuncCall,
+    /// Non-vector fields to return (from SELECT list).
+    return_fields: Vec<String>,
+    /// Redis Search filter string from WHERE clause (without vector function).
+    where_filter: Option<String>,
+    /// KNN N value (from LIMIT).
+    knn_num: usize,
+    /// The binary vector blob.
+    vector_blob: Option<Vec<u8>>,
+}
+
+impl ParsedVectorSelect {
+    /// Generates a KNN query string: `(filter)=>[KNN N @field $vector AS alias]`
+    fn to_knn_query_string(&self) -> String {
+        let base = self.where_filter.as_deref().unwrap_or("*");
+        format!(
+            "{}=>[KNN {} @{} $vector AS {}]",
+            base, self.knn_num, self.vector_fn.field, self.vector_fn.alias
+        )
+    }
+
+    /// Returns `QueryParam` entries for the vector blob.
+    fn params(&self) -> Vec<QueryParam> {
+        if let Some(ref blob) = self.vector_blob {
+            vec![QueryParam {
+                name: "vector".to_owned(),
+                value: QueryParamValue::Binary(blob.clone()),
+            }]
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+/// Try to parse a SQL SELECT with vector_distance or cosine_distance.
+///
+/// Detects patterns like:
+/// - `SELECT title, vector_distance(embedding, :vec) AS score FROM idx LIMIT 3`
+/// - `SELECT title, cosine_distance(embedding, :vec) AS dist FROM idx WHERE genre = 'x' LIMIT 3`
+fn parse_vector_select(
+    sql: &str,
+    params: &HashMap<String, SqlParam>,
+) -> Option<ParsedVectorSelect> {
+    let tokens = tokenize(sql);
+    if tokens.is_empty() {
+        return None;
+    }
+    let mut pos = 0;
+
+    // SELECT
+    if !tok_eq(&tokens, pos, "SELECT") {
+        return None;
+    }
+    pos += 1;
+
+    // Scan SELECT list for vector function calls.
+    let mut vector_fn: Option<VectorFuncCall> = None;
+    let mut return_fields: Vec<String> = Vec::new();
+
+    while pos < tokens.len() && !tok_eq(&tokens, pos, "FROM") {
+        if tokens[pos] == "," {
+            pos += 1;
+            continue;
+        }
+
+        // Check for vector_distance(...) or cosine_distance(...)
+        let lower = tokens[pos].to_ascii_lowercase();
+        if (lower == "vector_distance" || lower == "cosine_distance")
+            && tok_eq(&tokens, pos + 1, "(")
+        {
+            let parsed = try_parse_vector_fn_call(&tokens, pos)?;
+            vector_fn = Some(parsed.0);
+            pos = parsed.1;
+            continue;
+        }
+
+        // Skip AS alias (for non-vector fields)
+        if tokens[pos].eq_ignore_ascii_case("AS") {
+            pos += 1; // skip "AS"
+            if pos < tokens.len() && !tok_eq(&tokens, pos, "FROM") {
+                pos += 1; // skip alias
+            }
+            continue;
+        }
+
+        // Regular field
+        if !tokens[pos].eq_ignore_ascii_case("*") {
+            return_fields.push(tokens[pos].clone());
+        }
+        pos += 1;
+    }
+
+    let vector_fn = vector_fn?; // Must have a vector function
+
+    // FROM
+    if !tok_eq(&tokens, pos, "FROM") {
+        return None;
+    }
+    pos += 1;
+    if pos >= tokens.len() {
+        return None;
+    }
+    pos += 1; // skip table name
+
+    // Parse WHERE, ORDER BY, LIMIT.
+    let mut where_filter: Option<String> = None;
+    let mut knn_num: usize = 10; // default
+
+    while pos < tokens.len() {
+        if tok_eq(&tokens, pos, "WHERE") {
+            pos += 1;
+            let (filter_str, next) = parse_where_clause(&tokens, pos)?;
+            where_filter = Some(filter_str);
+            pos = next;
+        } else if tok_eq(&tokens, pos, "ORDER") {
+            // Skip ORDER BY for vector queries (ordering is by vector distance).
+            while pos < tokens.len()
+                && !tok_eq(&tokens, pos, "LIMIT")
+                && !tok_eq(&tokens, pos, "WHERE")
+            {
+                pos += 1;
+            }
+        } else if tok_eq(&tokens, pos, "LIMIT") {
+            pos += 1;
+            knn_num = parse_usize(&tokens, pos)?;
+            pos += 1;
+            // Skip OFFSET if present
+            if tok_eq(&tokens, pos, "OFFSET") {
+                pos += 2;
+            }
+        } else {
+            pos += 1;
+        }
+    }
+
+    // Look up the binary vector blob from params.
+    let vector_blob = params.get(&vector_fn.param_name).and_then(|p| {
+        if let SqlParam::Bytes(b) = p {
+            Some(b.clone())
+        } else {
+            None
+        }
+    });
+
+    Some(ParsedVectorSelect {
+        vector_fn,
+        return_fields,
+        where_filter,
+        knn_num,
+        vector_blob,
+    })
+}
+
+/// Parse a vector function call: `vector_distance(field, :param)` or
+/// `cosine_distance(field, :param)`, optionally followed by `AS alias`.
+fn try_parse_vector_fn_call(tokens: &[String], pos: usize) -> Option<(VectorFuncCall, usize)> {
+    if pos + 5 >= tokens.len() {
+        return None;
+    }
+
+    let _func_name = &tokens[pos]; // vector_distance or cosine_distance
+    let mut p = pos + 1;
+
+    // Expect '('
+    if !tok_eq(tokens, p, "(") {
+        return None;
+    }
+    p += 1;
+
+    // Field name
+    let field = tokens[p].clone();
+    p += 1;
+
+    // Expect ','
+    if !tok_eq(tokens, p, ",") {
+        return None;
+    }
+    p += 1;
+
+    // Parameter reference: :param_name
+    let param_tok = &tokens[p];
+    let param_name = if param_tok.starts_with(':') {
+        param_tok[1..].to_string()
+    } else {
+        param_tok.clone()
+    };
+    p += 1;
+
+    // Expect ')'
+    if !tok_eq(tokens, p, ")") {
+        return None;
+    }
+    p += 1;
+
+    // Optional AS alias
+    let alias = if tok_eq(tokens, p, "AS") {
+        p += 1;
+        if p >= tokens.len() {
+            return None;
+        }
+        let a = tokens[p].clone();
+        p += 1;
+        a
+    } else {
+        "vector_distance".to_string()
+    };
+
+    Some((
+        VectorFuncCall {
+            field,
+            param_name,
+            alias,
+        },
+        p,
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Geo SQL parser → GEOFILTER and FT.AGGREGATE APPLY geodistance
+// ---------------------------------------------------------------------------
+
+/// Parsed geo_distance() call in a WHERE clause.
+#[derive(Debug, Clone)]
+struct ParsedGeoWhere {
+    /// The GEOFILTER specification.
+    geofilter: super::GeoFilter,
+    /// Non-geo Redis Search filter from the WHERE clause.
+    non_geo_filter: Option<String>,
+    /// Return fields from SELECT.
+    return_fields: Vec<String>,
+}
+
+impl ParsedGeoWhere {
+    /// Returns the filter string (non-geo part, or wildcard).
+    fn filter_string(&self) -> String {
+        self.non_geo_filter
+            .clone()
+            .unwrap_or_else(|| "*".to_owned())
+    }
+}
+
+/// Parsed geo_distance() call in SELECT (generates FT.AGGREGATE).
+#[derive(Debug, Clone)]
+struct ParsedGeoAggregate {
+    /// The geo field name.
+    geo_field: String,
+    /// Longitude of the reference point.
+    lon: f64,
+    /// Latitude of the reference point.
+    lat: f64,
+    /// Output alias.
+    alias: String,
+    /// Filter from WHERE clause.
+    where_filter: Option<String>,
+}
+
+impl ParsedGeoAggregate {
+    /// Builds an `FT.AGGREGATE` command with `APPLY geodistance(...)`.
+    fn build_cmd(&self, index_name: &str) -> redis::Cmd {
+        let mut cmd = redis::cmd("FT.AGGREGATE");
+        cmd.arg(index_name);
+        cmd.arg(self.where_filter.as_deref().unwrap_or("*"));
+
+        // LOAD field (ensure the geo field is available for APPLY)
+        cmd.arg("LOAD")
+            .arg(1_u32)
+            .arg(format!("@{}", self.geo_field));
+
+        // APPLY geodistance(@field, lon, lat) AS alias
+        let expr = format!(
+            "geodistance(@{}, {}, {})",
+            self.geo_field, self.lon, self.lat
+        );
+        cmd.arg("APPLY").arg(expr).arg("AS").arg(&self.alias);
+
+        cmd
+    }
+}
+
+/// Try to parse a SQL SELECT with geo_distance() in the WHERE clause.
+///
+/// Pattern: `WHERE geo_distance(location, POINT(lon, lat), 'unit') < radius`
+fn parse_geo_where(sql: &str) -> Option<ParsedGeoWhere> {
+    let tokens = tokenize(sql);
+    if tokens.is_empty() {
+        return None;
+    }
+    let mut pos = 0;
+
+    // SELECT
+    if !tok_eq(&tokens, pos, "SELECT") {
+        return None;
+    }
+    pos += 1;
+
+    // Parse SELECT list.
+    let mut return_fields: Vec<String> = Vec::new();
+    if tok_eq(&tokens, pos, "*") {
+        pos += 1;
+    } else {
+        while pos < tokens.len() && !tok_eq(&tokens, pos, "FROM") {
+            if tokens[pos] == "," || tokens[pos].eq_ignore_ascii_case("AS") {
+                pos += 1;
+                // Skip alias name after AS
+                if pos > 1
+                    && tokens[pos - 1].eq_ignore_ascii_case("AS")
+                    && pos < tokens.len()
+                    && !tok_eq(&tokens, pos, "FROM")
+                {
+                    pos += 1;
+                }
+                continue;
+            }
+            return_fields.push(tokens[pos].clone());
+            pos += 1;
+        }
+    }
+
+    // FROM table
+    if !tok_eq(&tokens, pos, "FROM") {
+        return None;
+    }
+    pos += 1;
+    if pos >= tokens.len() {
+        return None;
+    }
+    pos += 1; // skip table name
+
+    // WHERE
+    if !tok_eq(&tokens, pos, "WHERE") {
+        return None;
+    }
+    pos += 1;
+
+    // Look for geo_distance(...) in the WHERE clause.
+    // Collect non-geo conditions and geo conditions.
+    let mut non_geo_conditions: Vec<String> = Vec::new();
+    let mut geofilter: Option<super::GeoFilter> = None;
+
+    loop {
+        if pos >= tokens.len() {
+            break;
+        }
+        let upper = tokens[pos].to_ascii_uppercase();
+        if matches!(upper.as_str(), "ORDER" | "LIMIT" | "GROUP" | "HAVING") {
+            break;
+        }
+        if upper == "AND" {
+            pos += 1;
+            continue;
+        }
+
+        // Check for geo_distance function
+        if tokens[pos].eq_ignore_ascii_case("geo_distance") && tok_eq(&tokens, pos + 1, "(") {
+            let (gf, next) = parse_geo_distance_where(&tokens, pos)?;
+            geofilter = Some(gf);
+            pos = next;
+            continue;
+        }
+
+        // Regular condition
+        let (filter, next) = parse_single_condition(&tokens, pos)?;
+        non_geo_conditions.push(filter);
+        pos = next;
+    }
+
+    let geofilter = geofilter?; // Must have a geo_distance call
+
+    let non_geo_filter = if non_geo_conditions.is_empty() {
+        None
+    } else if non_geo_conditions.len() == 1 {
+        Some(non_geo_conditions.into_iter().next().unwrap())
+    } else {
+        Some(format!("({})", non_geo_conditions.join(" ")))
+    };
+
+    Some(ParsedGeoWhere {
+        geofilter,
+        non_geo_filter,
+        return_fields,
+    })
+}
+
+/// Parse `geo_distance(field, POINT(lon, lat), 'unit') < radius` from WHERE.
+///
+/// Returns a `GeoFilter` and the position after the comparison.
+fn parse_geo_distance_where(tokens: &[String], pos: usize) -> Option<(super::GeoFilter, usize)> {
+    let mut p = pos;
+
+    // geo_distance
+    if !tokens[p].eq_ignore_ascii_case("geo_distance") {
+        return None;
+    }
+    p += 1;
+
+    // (
+    if !tok_eq(tokens, p, "(") {
+        return None;
+    }
+    p += 1;
+
+    // field name
+    let field = tokens[p].clone();
+    p += 1;
+
+    // ,
+    if !tok_eq(tokens, p, ",") {
+        return None;
+    }
+    p += 1;
+
+    // POINT(lon, lat) or just lon, lat
+    let (lon, lat);
+    if tokens[p].eq_ignore_ascii_case("POINT") {
+        p += 1;
+        // (
+        if !tok_eq(tokens, p, "(") {
+            return None;
+        }
+        p += 1;
+        lon = tokens[p].parse::<f64>().ok()?;
+        p += 1;
+        // ,
+        if !tok_eq(tokens, p, ",") {
+            return None;
+        }
+        p += 1;
+        lat = tokens[p].parse::<f64>().ok()?;
+        p += 1;
+        // )
+        if !tok_eq(tokens, p, ")") {
+            return None;
+        }
+        p += 1;
+    } else {
+        lon = tokens[p].parse::<f64>().ok()?;
+        p += 1;
+        if tok_eq(tokens, p, ",") {
+            p += 1;
+        }
+        lat = tokens[p].parse::<f64>().ok()?;
+        p += 1;
+    }
+
+    // , 'unit'
+    if !tok_eq(tokens, p, ",") {
+        return None;
+    }
+    p += 1;
+    let unit = unquote(&tokens[p]);
+    p += 1;
+
+    // )
+    if !tok_eq(tokens, p, ")") {
+        return None;
+    }
+    p += 1;
+
+    // < radius
+    if !tok_eq(tokens, p, "<") {
+        return None;
+    }
+    p += 1;
+    let radius = tokens[p].parse::<f64>().ok()?;
+    p += 1;
+
+    Some((
+        super::GeoFilter {
+            field,
+            lon,
+            lat,
+            radius,
+            unit,
+        },
+        p,
+    ))
+}
+
+/// Try to parse a SQL SELECT with geo_distance() in the SELECT clause.
+///
+/// Pattern: `SELECT name, geo_distance(location, POINT(lon, lat)) AS distance FROM idx`
+/// → FT.AGGREGATE with APPLY geodistance.
+fn parse_geo_aggregate(sql: &str) -> Option<ParsedGeoAggregate> {
+    let tokens = tokenize(sql);
+    if tokens.is_empty() {
+        return None;
+    }
+    let mut pos = 0;
+
+    if !tok_eq(&tokens, pos, "SELECT") {
+        return None;
+    }
+    pos += 1;
+
+    let mut geo_field: Option<String> = None;
+    let mut geo_lon: Option<f64> = None;
+    let mut geo_lat: Option<f64> = None;
+    let mut geo_alias: Option<String> = None;
+
+    // Parse SELECT list for geo_distance function call.
+    while pos < tokens.len() && !tok_eq(&tokens, pos, "FROM") {
+        if tokens[pos] == "," {
+            pos += 1;
+            continue;
+        }
+
+        if tokens[pos].eq_ignore_ascii_case("geo_distance") && tok_eq(&tokens, pos + 1, "(") {
+            // Parse geo_distance(field, POINT(lon, lat))
+            pos += 2; // skip "geo_distance" and "("
+            let field = tokens[pos].clone();
+            pos += 1;
+            if !tok_eq(&tokens, pos, ",") {
+                return None;
+            }
+            pos += 1;
+
+            // POINT(lon, lat)
+            let (lon, lat);
+            if tokens[pos].eq_ignore_ascii_case("POINT") {
+                pos += 1;
+                if !tok_eq(&tokens, pos, "(") {
+                    return None;
+                }
+                pos += 1;
+                lon = tokens[pos].parse::<f64>().ok()?;
+                pos += 1;
+                if tok_eq(&tokens, pos, ",") {
+                    pos += 1;
+                }
+                lat = tokens[pos].parse::<f64>().ok()?;
+                pos += 1;
+                if !tok_eq(&tokens, pos, ")") {
+                    return None;
+                }
+                pos += 1;
+            } else {
+                return None;
+            }
+
+            // )
+            if !tok_eq(&tokens, pos, ")") {
+                return None;
+            }
+            pos += 1;
+
+            // AS alias
+            let alias = if tok_eq(&tokens, pos, "AS") {
+                pos += 1;
+                let a = tokens[pos].clone();
+                pos += 1;
+                a
+            } else {
+                "distance".to_string()
+            };
+
+            geo_field = Some(field);
+            geo_lon = Some(lon);
+            geo_lat = Some(lat);
+            geo_alias = Some(alias);
+            continue;
+        }
+
+        // Skip AS alias for non-geo fields
+        if tokens[pos].eq_ignore_ascii_case("AS") {
+            pos += 1;
+            if pos < tokens.len() {
+                pos += 1; // skip alias
+            }
+            continue;
+        }
+
+        // Skip non-geo field
+        pos += 1;
+    }
+
+    let geo_field = geo_field?;
+    let lon = geo_lon?;
+    let lat = geo_lat?;
+    let alias = geo_alias.unwrap_or_else(|| "distance".to_string());
+
+    // FROM
+    if !tok_eq(&tokens, pos, "FROM") {
+        return None;
+    }
+    pos += 1;
+    if pos >= tokens.len() {
+        return None;
+    }
+    pos += 1; // skip table
+
+    // Optional WHERE
+    let mut where_filter: Option<String> = None;
+    while pos < tokens.len() {
+        if tok_eq(&tokens, pos, "WHERE") {
+            pos += 1;
+            let (filter_str, next) = parse_where_clause(&tokens, pos)?;
+            where_filter = Some(filter_str);
+            pos = next;
+        } else {
+            pos += 1;
+        }
+    }
+
+    Some(ParsedGeoAggregate {
+        geo_field,
+        lon,
+        lat,
+        alias,
+        where_filter,
+    })
+}
+
 /// Parse a WHERE clause starting at `pos`. Returns the Redis filter string and
 /// the position after the last consumed token.
 ///
@@ -1021,6 +1714,19 @@ fn tokenize(sql: &str) -> Vec<String> {
                 i += 1;
             }
             tokens.push(s);
+            continue;
+        }
+        // Parameter reference (e.g. :vec, :param_name).
+        if chars[i] == ':'
+            && i + 1 < len
+            && (chars[i + 1].is_ascii_alphabetic() || chars[i + 1] == '_')
+        {
+            let start = i;
+            i += 1; // skip ':'
+            while i < len && (chars[i].is_ascii_alphanumeric() || chars[i] == '_') {
+                i += 1;
+            }
+            tokens.push(chars[start..i].iter().collect());
             continue;
         }
         // Identifier or keyword.
@@ -2031,5 +2737,180 @@ mod tests {
         // to_redis_query falls back to raw substituted SQL
         let redis_q = q.to_redis_query();
         assert!(redis_q.contains("COUNT"));
+    }
+
+    // ---- Vector SQL tests ----
+
+    #[test]
+    fn vector_distance_basic() {
+        let blob = vec![0u8; 12]; // 3 x f32
+        let q = SQLQuery::new(
+            "SELECT title, vector_distance(embedding, :vec) AS score FROM idx LIMIT 3",
+        )
+        .with_param("vec", SqlParam::Bytes(blob.clone()));
+        assert!(q.is_vector_query());
+        let query_str = q.to_redis_query();
+        assert_eq!(query_str, "*=>[KNN 3 @embedding $vector AS score]");
+        let params = q.params();
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "vector");
+        if let QueryParamValue::Binary(ref b) = params[0].value {
+            assert_eq!(b, &blob);
+        } else {
+            panic!("Expected Binary param");
+        }
+    }
+
+    #[test]
+    fn cosine_distance_basic() {
+        let blob = vec![0u8; 12];
+        let q = SQLQuery::new(
+            "SELECT title, cosine_distance(embedding, :vec) AS dist FROM idx LIMIT 5",
+        )
+        .with_param("vec", SqlParam::Bytes(blob));
+        assert!(q.is_vector_query());
+        let query_str = q.to_redis_query();
+        assert_eq!(query_str, "*=>[KNN 5 @embedding $vector AS dist]");
+    }
+
+    #[test]
+    fn vector_distance_with_where_filter() {
+        let blob = vec![0u8; 12];
+        let q = SQLQuery::new(
+            "SELECT title, vector_distance(embedding, :vec) AS score FROM idx WHERE genre = 'sci-fi' LIMIT 3",
+        )
+        .with_param("vec", SqlParam::Bytes(blob));
+        let query_str = q.to_redis_query();
+        assert_eq!(
+            query_str,
+            "@genre:{sci\\-fi}=>[KNN 3 @embedding $vector AS score]"
+        );
+    }
+
+    #[test]
+    fn vector_distance_default_alias() {
+        let blob = vec![0u8; 12];
+        let q = SQLQuery::new("SELECT vector_distance(embedding, :vec) FROM idx LIMIT 10")
+            .with_param("vec", SqlParam::Bytes(blob));
+        let query_str = q.to_redis_query();
+        assert_eq!(
+            query_str,
+            "*=>[KNN 10 @embedding $vector AS vector_distance]"
+        );
+    }
+
+    #[test]
+    fn vector_query_return_fields() {
+        let blob = vec![0u8; 12];
+        let q = SQLQuery::new(
+            "SELECT title, author, vector_distance(embedding, :vec) AS score FROM idx LIMIT 5",
+        )
+        .with_param("vec", SqlParam::Bytes(blob));
+        let fields = q.return_fields();
+        assert_eq!(fields, vec!["title", "author"]);
+    }
+
+    #[test]
+    fn vector_query_limit_as_knn() {
+        let blob = vec![0u8; 12];
+        let q = SQLQuery::new("SELECT vector_distance(embedding, :vec) AS score FROM idx LIMIT 7")
+            .with_param("vec", SqlParam::Bytes(blob));
+        let limit = q.limit().expect("should have limit");
+        assert_eq!(limit.num, 7);
+        assert_eq!(limit.offset, 0);
+    }
+
+    #[test]
+    fn non_vector_query_not_detected_as_vector() {
+        let q = SQLQuery::new("SELECT * FROM products WHERE price > 10");
+        assert!(!q.is_vector_query());
+    }
+
+    // ---- Geo WHERE tests (GEOFILTER) ----
+
+    #[test]
+    fn geo_distance_where_basic() {
+        let q = SQLQuery::new(
+            "SELECT * FROM locations WHERE geo_distance(location, POINT(-122.4194, 37.7749), 'km') < 50",
+        );
+        let gf = q.geofilter().expect("should have geofilter");
+        assert_eq!(gf.field, "location");
+        assert!((gf.lon - (-122.4194)).abs() < 0.0001);
+        assert!((gf.lat - 37.7749).abs() < 0.0001);
+        assert!((gf.radius - 50.0).abs() < 0.001);
+        assert_eq!(gf.unit, "km");
+        // Query string should be wildcard (no additional filter).
+        assert_eq!(q.to_redis_query(), "*");
+    }
+
+    #[test]
+    fn geo_distance_where_with_other_conditions() {
+        let q = SQLQuery::new(
+            "SELECT name FROM locations WHERE category = 'restaurant' AND geo_distance(location, POINT(-122.4194, 37.7749), 'mi') < 10",
+        );
+        let gf = q.geofilter().expect("should have geofilter");
+        assert_eq!(gf.field, "location");
+        assert!((gf.radius - 10.0).abs() < 0.001);
+        assert_eq!(gf.unit, "mi");
+        // Query string should have the non-geo filter.
+        assert_eq!(q.to_redis_query(), "@category:{restaurant}");
+    }
+
+    #[test]
+    fn non_geo_query_no_geofilter() {
+        let q = SQLQuery::new("SELECT * FROM products WHERE price > 10");
+        assert!(q.geofilter().is_none());
+    }
+
+    // ---- Geo aggregate (SELECT geo_distance) tests ----
+
+    #[test]
+    fn geo_distance_select_aggregate() {
+        let q = SQLQuery::new(
+            "SELECT name, geo_distance(location, POINT(-122.4194, 37.7749)) AS distance FROM locations",
+        );
+        assert!(q.is_geo_aggregate());
+        let cmd = q.build_geo_aggregate_cmd("idx").expect("should build cmd");
+        let packed = cmd.get_packed_command();
+        let args = parse_resp_args(&packed);
+        assert_eq!(args[0], "FT.AGGREGATE");
+        assert_eq!(args[1], "idx");
+        assert_eq!(args[2], "*");
+        assert_eq!(args[3], "LOAD");
+        assert_eq!(args[4], "1");
+        assert_eq!(args[5], "@location");
+        assert_eq!(args[6], "APPLY");
+        assert!(args[7].contains("geodistance"));
+        assert!(args[7].contains("@location"));
+        assert_eq!(args[8], "AS");
+        assert_eq!(args[9], "distance");
+    }
+
+    #[test]
+    fn geo_distance_select_with_where() {
+        let q = SQLQuery::new(
+            "SELECT name, geo_distance(location, POINT(-73.9857, 40.7484)) AS dist FROM places WHERE category = 'cafe'",
+        );
+        assert!(q.is_geo_aggregate());
+        let cmd = q.build_geo_aggregate_cmd("idx").expect("should build cmd");
+        let packed = cmd.get_packed_command();
+        let args = parse_resp_args(&packed);
+        assert_eq!(args[0], "FT.AGGREGATE");
+        assert_eq!(args[2], "@category:{cafe}");
+    }
+
+    #[test]
+    fn non_geo_not_detected_as_geo_aggregate() {
+        let q = SQLQuery::new("SELECT * FROM products WHERE price > 10");
+        assert!(!q.is_geo_aggregate());
+        assert!(q.build_geo_aggregate_cmd("idx").is_none());
+    }
+
+    // ---- Tokenizer test for :param ----
+
+    #[test]
+    fn tokenizer_handles_colon_param() {
+        let tokens = tokenize("SELECT vector_distance(embedding, :vec) AS score FROM idx");
+        assert!(tokens.contains(&":vec".to_owned()));
     }
 }

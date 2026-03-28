@@ -1,4 +1,20 @@
 //! Query builders for Redis Search and RedisVL semantics.
+//!
+//! This module provides builder types for all supported Redis Search query modes:
+//!
+//! - [`VectorQuery`] – K-nearest neighbor vector similarity search
+//! - [`VectorRangeQuery`] – vector search within a distance threshold
+//! - [`TextQuery`] – full-text search with Redis Search syntax
+//! - [`FilterQuery`] – filter-only search (no scoring)
+//! - [`CountQuery`] – return only the count of matching documents
+//! - [`HybridQuery`] – combined text + vector search via `FT.HYBRID` (Redis 8.4+)
+//! - [`AggregateHybridQuery`] – text + vector fusion via `FT.AGGREGATE`
+//! - [`MultiVectorQuery`] – multi-vector aggregate search
+//! - `SQLQuery` – SQL `SELECT` → Redis Search translation *(requires `sql` feature)*
+//!
+//! All query types implement [`QueryString`] so they can be passed to
+//! [`SearchIndex::search`](crate::index::SearchIndex::search) or
+//! [`SearchIndex::query`](crate::index::SearchIndex::query).
 
 use std::borrow::Cow;
 
@@ -51,6 +67,21 @@ pub struct QueryLimit {
     pub num: usize,
 }
 
+/// A geo-spatial filter for `FT.SEARCH` GEOFILTER.
+#[derive(Debug, Clone)]
+pub struct GeoFilter {
+    /// The geo field name.
+    pub field: String,
+    /// Longitude of the center point.
+    pub lon: f64,
+    /// Latitude of the center point.
+    pub lat: f64,
+    /// Search radius.
+    pub radius: f64,
+    /// Distance unit (`km`, `mi`, `m`, `ft`).
+    pub unit: String,
+}
+
 /// Fully rendered Redis Search query metadata.
 #[derive(Debug, Clone)]
 pub struct QueryRender {
@@ -72,6 +103,8 @@ pub struct QueryRender {
     pub no_content: bool,
     /// Optional scorer name.
     pub scorer: Option<String>,
+    /// Optional GEOFILTER clause.
+    pub geofilter: Option<GeoFilter>,
 }
 
 /// High-level result shape expected from a query.
@@ -100,6 +133,7 @@ pub trait QueryString {
             in_order: self.in_order(),
             no_content: self.no_content(),
             scorer: self.scorer(),
+            geofilter: self.geofilter(),
         }
     }
 
@@ -152,6 +186,11 @@ pub trait QueryString {
     /// explicit projection is requested.
     fn should_unpack_json(&self) -> bool {
         false
+    }
+
+    /// Optional geo-spatial filter for `FT.SEARCH` `GEOFILTER` clause.
+    fn geofilter(&self) -> Option<GeoFilter> {
+        None
     }
 }
 
