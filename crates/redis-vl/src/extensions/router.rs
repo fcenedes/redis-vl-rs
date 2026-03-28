@@ -479,7 +479,13 @@ impl SemanticRouter {
         let client = self.connection.client()?;
         let mut conn = client.get_connection()?;
         let _: usize = redis::cmd("DEL").arg(&config_key).query(&mut conn)?;
-        self.index.delete(true)
+        // Tolerate the index already being deleted (e.g. by another router
+        // instance pointing at the same name after a YAML/dict round-trip).
+        match self.index.delete(true) {
+            Ok(()) => Ok(()),
+            Err(Error::InvalidInput(msg)) if msg.contains("does not exist") => Ok(()),
+            Err(other) => Err(other),
+        }
     }
 
     /// Adds new references to an existing route and loads them into Redis.
@@ -650,7 +656,14 @@ impl SemanticRouter {
             return Ok(0);
         }
 
-        // Collect references to remove from in-memory routes before deleting
+        // Remove matching references from in-memory routes.
+        //
+        // We derive the route name and reference text from the key structure
+        // rather than fetching from Redis, because hash documents contain
+        // binary vector data that cannot be decoded as UTF-8 strings.
+        //
+        // Key format: {prefix}{sep}{route_name}{sep}{sha256_hash}
+        // Reference ID format: {route_name}:{sha256_hash}
         let sep = self.index.key_separator();
         let prefix_raw = self.index.prefix().trim_end_matches(sep);
         let prefix_with_sep = if prefix_raw.is_empty() {
@@ -659,16 +672,14 @@ impl SemanticRouter {
             format!("{prefix_raw}{sep}")
         };
         for key in &keys_to_delete {
-            // Strip prefix+separator to recover the id for fetch
             let id = key.strip_prefix(&prefix_with_sep).unwrap_or(key);
-            if let Ok(Some(Value::Object(doc))) = self.index.fetch(id) {
-                if let (Some(rname), Some(ref_text)) = (
-                    doc.get(ROUTER_ROUTE_NAME_FIELD).and_then(Value::as_str),
-                    doc.get(ROUTER_REFERENCE_FIELD).and_then(Value::as_str),
-                ) {
-                    if let Some(route) = self.routes.iter_mut().find(|r| r.name == rname) {
-                        route.references.retain(|r| r != ref_text);
-                    }
+            // id is "route_name:hash" — extract route_name from the first ':'
+            if let Some((rname, _hash)) = id.split_once(':') {
+                if let Some(route) = self.routes.iter_mut().find(|r| r.name == rname) {
+                    // Find which reference produces this reference_id
+                    route
+                        .references
+                        .retain(|ref_text| route_reference_id(rname, ref_text) != id);
                 }
             }
         }
