@@ -699,12 +699,16 @@ impl SvsCompressionType {
 #[serde(rename_all = "UPPERCASE")]
 pub enum VectorDataType {
     /// Brain floating point 16-bit vectors.
+    #[serde(alias = "bfloat16", alias = "Bfloat16")]
     Bfloat16,
     /// IEEE 754 half-precision 16-bit vectors.
+    #[serde(alias = "float16", alias = "Float16")]
     Float16,
     /// 32-bit floating point vectors.
+    #[serde(alias = "float32", alias = "Float32")]
     Float32,
     /// 64-bit floating point vectors.
+    #[serde(alias = "float64", alias = "Float64")]
     Float64,
 }
 
@@ -765,10 +769,13 @@ impl Default for VectorDataType {
 #[serde(rename_all = "UPPERCASE")]
 pub enum VectorDistanceMetric {
     /// Cosine distance.
+    #[serde(alias = "cosine", alias = "Cosine")]
     Cosine,
     /// Euclidean distance.
+    #[serde(alias = "l2", alias = "L2")]
     L2,
     /// Inner product distance.
+    #[serde(alias = "ip", alias = "Ip")]
     Ip,
 }
 
@@ -1148,6 +1155,78 @@ fields:
 
         let deserialized: VectorDataType = serde_json::from_str("\"FLOAT64\"").unwrap();
         assert_eq!(deserialized, VectorDataType::Float64);
+    }
+
+    #[test]
+    fn vector_data_type_serde_lowercase_aliases() {
+        use super::VectorDataType;
+
+        // Redis FT.INFO returns lowercase dtype strings like "float32".
+        // Serde must accept these via aliases.
+        for (input, expected) in [
+            ("\"float32\"", VectorDataType::Float32),
+            ("\"float64\"", VectorDataType::Float64),
+            ("\"float16\"", VectorDataType::Float16),
+            ("\"bfloat16\"", VectorDataType::Bfloat16),
+            ("\"Float32\"", VectorDataType::Float32),
+            ("\"Bfloat16\"", VectorDataType::Bfloat16),
+        ] {
+            let deserialized: VectorDataType = serde_json::from_str(input)
+                .unwrap_or_else(|e| panic!("should deserialize {input}: {e}"));
+            assert_eq!(deserialized, expected, "mismatch for input {input}");
+        }
+    }
+
+    #[test]
+    fn vector_distance_metric_serde_lowercase_aliases() {
+        use super::VectorDistanceMetric;
+
+        // Redis FT.INFO may return lowercase distance metric strings.
+        for (input, expected_name) in [
+            ("\"COSINE\"", "COSINE"),
+            ("\"cosine\"", "COSINE"),
+            ("\"Cosine\"", "COSINE"),
+            ("\"L2\"", "L2"),
+            ("\"l2\"", "L2"),
+            ("\"IP\"", "IP"),
+            ("\"ip\"", "IP"),
+        ] {
+            let deserialized: VectorDistanceMetric = serde_json::from_str(input)
+                .unwrap_or_else(|e| panic!("should deserialize {input}: {e}"));
+            assert_eq!(
+                deserialized.redis_name(),
+                expected_name,
+                "mismatch for input {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn schema_from_json_with_lowercase_dtype() {
+        use super::{FieldKind, VectorDataType};
+
+        // Schemas constructed by extensions use dtype.as_str() which returns
+        // lowercase (e.g. "float32"). These must parse correctly.
+        let schema = IndexSchema::from_json_value(serde_json::json!({
+            "index": { "name": "lc_test", "prefix": "lc" },
+            "fields": [{
+                "name": "vec",
+                "type": "vector",
+                "attrs": {
+                    "algorithm": "flat",
+                    "dims": 3,
+                    "datatype": "float32",
+                    "distance_metric": "cosine"
+                }
+            }]
+        }))
+        .expect("schema with lowercase dtype/distance_metric should parse");
+
+        if let FieldKind::Vector { ref attrs } = schema.fields[0].kind {
+            assert_eq!(attrs.datatype, VectorDataType::Float32);
+        } else {
+            panic!("expected vector field");
+        }
     }
 
     #[test]
