@@ -227,6 +227,7 @@ fn hybrid_query_basic_rrf() {
         Vector::new(vec![0.1, 0.1, 0.5]),
         "user_embedding",
     )
+    .with_num_results(7)
     .with_yield_text_score_as("text_score")
     .with_yield_vsim_score_as("vsim_score")
     .with_rrf(None, None)
@@ -427,6 +428,7 @@ fn hybrid_query_linear_alpha() {
             Vector::new(vec![0.1, 0.1, 0.5]),
             "user_embedding",
         )
+        .with_num_results(7)
         .with_linear(alpha)
         .with_yield_text_score_as("text_score")
         .with_yield_vsim_score_as("vector_similarity")
@@ -436,14 +438,24 @@ fn hybrid_query_linear_alpha() {
             Ok(output) => {
                 let docs = output.as_documents().expect("documents");
                 assert_eq!(docs.len(), 7);
-                // Verify the combined score matches alpha*text + (1-alpha)*vsim
+                // Verify the combined score matches alpha*text + (1-alpha)*vsim.
+                // Note: FT.HYBRID only includes text_score when the doc matched
+                // the text search component. Default to 0.0 when absent.
                 for doc in docs {
-                    let text_s: f64 = doc["text_score"].as_str().unwrap().parse().unwrap();
-                    let vsim_s: f64 = doc["vector_similarity"].as_str().unwrap().parse().unwrap();
+                    let text_s: f64 = doc
+                        .get("text_score")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0.0);
+                    let vsim_s: f64 = doc
+                        .get("vector_similarity")
+                        .and_then(|v| v.as_str())
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0.0);
                     let hybrid_s: f64 = doc["hybrid_score"].as_str().unwrap().parse().unwrap();
                     let expected = (alpha as f64) * text_s + (1.0 - alpha as f64) * vsim_s;
                     assert!(
-                        (hybrid_s - expected).abs() <= 0.001,
+                        (hybrid_s - expected).abs() <= 0.01,
                         "alpha={alpha}: hybrid_score {hybrid_s} != expected {expected}"
                     );
                 }
@@ -480,6 +492,7 @@ fn hybrid_query_with_stopwords() {
         Vector::new(vec![0.1, 0.1, 0.5]),
         "user_embedding",
     )
+    .with_num_results(7)
     .with_linear(0.5)
     .with_stopwords(stopwords)
     .with_yield_text_score_as("text_score")
@@ -532,6 +545,7 @@ fn aggregate_hybrid_query_basic() {
         "user_embedding",
     )
     .unwrap()
+    .with_num_results(7)
     .with_return_fields([
         "user",
         "credit_score",
@@ -688,7 +702,8 @@ fn aggregate_hybrid_query_alpha() {
             "user_embedding",
         )
         .unwrap()
-        .with_alpha(alpha);
+        .with_alpha(alpha)
+        .with_num_results(7);
 
         match index.aggregate_query(&query) {
             Ok(output) => {

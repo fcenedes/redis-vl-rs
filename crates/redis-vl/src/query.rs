@@ -837,30 +837,41 @@ impl<'a> VectorRangeQuery<'a> {
 
 impl QueryString for VectorRangeQuery<'_> {
     fn to_redis_query(&self) -> String {
-        let base = self
+        let filter = self
             .filter_expression
             .as_ref()
             .map_or_else(|| "*".to_owned(), FilterExpression::to_redis_syntax);
-        let mut query = format!(
-            "@{}:[VECTOR_RANGE $distance_threshold $vector",
+
+        // Build the VECTOR_RANGE clause.
+        let base_query = format!(
+            "@{}:[VECTOR_RANGE $distance_threshold $vector]",
             self.vector_field_name
         );
-        // SVS-VAMANA and epsilon params are embedded in the query string as
-        // `$PARAM: value` (following upstream Python behaviour).
+
+        // Build query attributes section (outside the brackets, in =>{...}).
+        // Attributes are semicolon-separated, matching upstream Python.
+        let mut attr_parts = vec!["$YIELD_DISTANCE_AS: vector_distance".to_owned()];
         if let Some(epsilon) = self.epsilon {
-            query.push_str(&format!(" $EPSILON: {}", epsilon));
+            attr_parts.push(format!("$EPSILON: {}", epsilon));
         }
         if let Some(size) = self.search_window_size {
-            query.push_str(&format!(" $SEARCH_WINDOW_SIZE: {}", size));
+            attr_parts.push(format!("$SEARCH_WINDOW_SIZE: {}", size));
         }
         if let Some(mode) = &self.use_search_history {
-            query.push_str(&format!(" $USE_SEARCH_HISTORY: {}", mode.as_str()));
+            attr_parts.push(format!("$USE_SEARCH_HISTORY: {}", mode.as_str()));
         }
         if let Some(capacity) = self.search_buffer_capacity {
-            query.push_str(&format!(" $SEARCH_BUFFER_CAPACITY: {}", capacity));
+            attr_parts.push(format!("$SEARCH_BUFFER_CAPACITY: {}", capacity));
         }
-        query.push_str(&format!(" $YIELD_DISTANCE_AS: vector_distance] {}", base));
-        query
+        let attr_section = format!("=>{{{}}}", attr_parts.join("; "));
+
+        // If filter is wildcard, return just the range + attrs.
+        // Otherwise, wrap the range+attrs and filter in parentheses.
+        if filter == "*" {
+            format!("{}{}", base_query, attr_section)
+        } else {
+            format!("({}{} {})", base_query, attr_section, filter)
+        }
     }
 
     fn params(&self) -> Vec<QueryParam> {
@@ -1532,14 +1543,27 @@ impl<'a> HybridQuery<'a> {
     /// Builds an `FT.HYBRID` command for this query.
     ///
     /// The command targets the given `index_name` and encodes all hybrid
-    /// query clauses (QUERY, VSIM, COMBINE_METHOD, LOAD, LIMIT).
+    /// query clauses (SEARCH, VSIM, COMBINE, LOAD, LIMIT).
+    ///
+    /// The wire format follows the redis-py `HybridQuery` / `HybridSearchQuery`
+    /// / `HybridVsimQuery` / `CombineResultsMethod` protocol:
+    ///
+    /// ```text
+    /// FT.HYBRID index
+    ///   SEARCH query_string [SCORER s] [YIELD_SCORE_AS a]
+    ///   VSIM @vec_field $param [method count kv…] [FILTER f] [YIELD_SCORE_AS a]
+    ///   [COMBINE method count kv…]
+    ///   [LOAD count @field…]
+    ///   [LIMIT offset num]
+    ///   PARAMS count key value…
+    /// ```
     pub fn build_cmd(&self, index_name: &str) -> redis::Cmd {
         let mut cmd = redis::cmd("FT.HYBRID");
         cmd.arg(index_name);
 
-        // QUERY clause
+        // SEARCH clause (Python uses "SEARCH", not "QUERY")
         let query_string = self.build_query_string();
-        cmd.arg("QUERY").arg(&query_string);
+        cmd.arg("SEARCH").arg(&query_string);
 
         if let Some(scorer) = &self.text_scorer {
             cmd.arg("SCORER").arg(scorer);
@@ -1553,17 +1577,36 @@ impl<'a> HybridQuery<'a> {
             .arg(format!("@{}", self.vector_field_name))
             .arg(format!("${}", self.vector_param_name));
 
+        // Vector search method: emitted as `METHOD count kv_pairs…`
+        // matching redis-py's `VectorSearchMethods` protocol which emits
+        // the method name followed by a count of key-value tokens.
         if let Some(method) = self.vector_search_method {
             match method {
                 VectorSearchMethod::Knn => {
-                    cmd.arg("SEARCH_METHOD").arg("KNN");
+                    // Count key-value pairs: K is mandatory; EF_RUNTIME is optional.
+                    let mut kv_count = 1_usize; // K
+                    if self.knn_ef_runtime.is_some() {
+                        kv_count += 1;
+                    }
+                    cmd.arg("KNN").arg(kv_count * 2);
                     cmd.arg("K").arg(self.num_results);
                     if let Some(ef) = self.knn_ef_runtime {
                         cmd.arg("EF_RUNTIME").arg(ef);
                     }
                 }
                 VectorSearchMethod::Range => {
-                    cmd.arg("SEARCH_METHOD").arg("RANGE");
+                    let mut kv_count = 0_usize;
+                    if self.range_radius.is_some() {
+                        kv_count += 1;
+                    }
+                    if self.range_epsilon.is_some() {
+                        kv_count += 1;
+                    }
+                    if kv_count > 0 {
+                        cmd.arg("RANGE").arg(kv_count * 2);
+                    } else {
+                        cmd.arg("RANGE");
+                    }
                     if let Some(radius) = self.range_radius {
                         cmd.arg("RADIUS").arg(radius);
                     }
@@ -1585,39 +1628,51 @@ impl<'a> HybridQuery<'a> {
             cmd.arg("YIELD_SCORE_AS").arg(alias);
         }
 
-        // COMBINE_METHOD clause
+        // COMBINE clause (Python uses "COMBINE", not "COMBINE_METHOD")
+        //
+        // Protocol: COMBINE <method> <count> [kv…] [YIELD_SCORE_AS alias]
+        // The <count> only covers method-specific key-value tokens (WINDOW,
+        // CONSTANT, ALPHA, BETA). YIELD_SCORE_AS is outside the counted
+        // section.
         if let Some(method) = &self.combination_method {
-            cmd.arg("COMBINE_METHOD").arg(method.redis_name());
+            cmd.arg("COMBINE").arg(method.redis_name());
 
+            // Collect ALL key-value pairs for the method — including
+            // YIELD_SCORE_AS which is inside the counted section (matching
+            // redis-py `CombineResultsMethod.get_args()`).
+            let mut kv_pairs: Vec<(String, String)> = Vec::new();
             match method {
                 HybridCombinationMethod::Rrf => {
                     if let Some(window) = self.rrf_window {
-                        cmd.arg("WINDOW").arg(window);
+                        kv_pairs.push(("WINDOW".to_owned(), window.to_string()));
                     }
                     if let Some(constant) = self.rrf_constant {
-                        cmd.arg("CONSTANT").arg(constant);
+                        kv_pairs.push(("CONSTANT".to_owned(), constant.to_string()));
                     }
                 }
                 HybridCombinationMethod::Linear => {
                     if let Some(alpha) = self.linear_alpha {
-                        cmd.arg("ALPHA").arg(alpha);
-                        cmd.arg("BETA").arg(1.0 - alpha);
+                        kv_pairs.push(("ALPHA".to_owned(), alpha.to_string()));
+                        kv_pairs.push(("BETA".to_owned(), (1.0 - alpha).to_string()));
                     }
                 }
             }
-
             if let Some(alias) = &self.yield_combined_score_as {
-                cmd.arg("YIELD_SCORE_AS").arg(alias);
+                kv_pairs.push(("YIELD_SCORE_AS".to_owned(), alias.clone()));
+            }
+
+            // Only emit count + kv pairs when there are params.
+            // Redis rejects `COMBINE RRF 0`; Python omits the count entirely
+            // when no kwargs are provided.
+            if !kv_pairs.is_empty() {
+                cmd.arg(kv_pairs.len() * 2);
+                for (k, v) in &kv_pairs {
+                    cmd.arg(k).arg(v);
+                }
             }
         }
 
-        // PARAMS substitution for vector blob
-        cmd.arg("PARAMS")
-            .arg(2)
-            .arg(&self.vector_param_name)
-            .arg(self.vector.to_bytes().as_ref());
-
-        // LOAD (return fields)
+        // LOAD (return fields with @-prefix, matching redis-py HybridPostProcessingConfig)
         if !self.return_fields.is_empty() {
             cmd.arg("LOAD");
             cmd.arg(self.return_fields.len());
@@ -1628,6 +1683,12 @@ impl<'a> HybridQuery<'a> {
 
         // LIMIT
         cmd.arg("LIMIT").arg(0).arg(self.num_results);
+
+        // PARAMS substitution for vector blob (must come after post-processing)
+        cmd.arg("PARAMS")
+            .arg(2)
+            .arg(&self.vector_param_name)
+            .arg(self.vector.to_bytes().as_ref());
 
         cmd
     }
@@ -1767,47 +1828,49 @@ impl<'a> AggregateHybridQuery<'a> {
 
     /// Builds the full-text query string, applying stopwords and weights.
     pub(crate) fn build_query_string(&self) -> String {
-        let mut text = self.text.clone();
+        // Tokenize, remove stopwords, and join with ` | ` (OR) — matching
+        // Python `FullTextQueryHelper._tokenize_and_escape_query`.
+        let tokens: Vec<String> = self
+            .text
+            .split_whitespace()
+            .map(|w| w.to_lowercase())
+            .filter(|w| {
+                if let Some(stopwords) = &self.stopwords {
+                    !stopwords.contains(w.as_str())
+                } else {
+                    true
+                }
+            })
+            .collect();
 
-        // Apply stopwords
-        if let Some(stopwords) = &self.stopwords {
-            if !stopwords.is_empty() {
-                let words: Vec<&str> = text.split_whitespace().collect();
-                let filtered: Vec<&str> = words
-                    .into_iter()
-                    .filter(|w| !stopwords.contains(&w.to_lowercase()))
-                    .collect();
-                text = filtered.join(" ");
-            }
-        }
+        // Apply word weights (token=>{weight})
+        let tokens: Vec<String> = tokens
+            .into_iter()
+            .map(|w| {
+                if let Some(weights) = &self.text_weights {
+                    if let Some(weight) = weights.get(&w) {
+                        return format!("{}=>{{{}}}", w, weight);
+                    }
+                }
+                w
+            })
+            .collect();
 
-        // Apply word weights
-        if let Some(weights) = &self.text_weights {
-            if !weights.is_empty() {
-                let words: Vec<String> = text
-                    .split_whitespace()
-                    .map(|w| {
-                        if let Some(weight) = weights.get(w) {
-                            format!("{}=>{{{}}}", w, weight)
-                        } else {
-                            w.to_owned()
-                        }
-                    })
-                    .collect();
-                text = words.join(" ");
-            }
-        }
+        let text = tokens.join(" | ");
 
-        // Build the base text query with optional filter
+        // Build with `~` (optional) prefix — Python wraps the entire text
+        // query and filter in `(~@field:(tokens) [AND filter])`.
+        // The `~` makes the text match optional so ALL docs are returned from
+        // the KNN part; text scoring still influences relevance.
         let base = if let Some(filter) = &self.filter_expression {
             let filter_str = filter.to_redis_syntax();
             if filter_str == "*" {
-                format!("@{}:({})", self.text_field_name, text)
+                format!("(~@{}:({}))", self.text_field_name, text)
             } else {
-                format!("({}) @{}:({})", filter_str, self.text_field_name, text)
+                format!("(~@{}:({}) AND {})", self.text_field_name, text, filter_str)
             }
         } else {
-            format!("@{}:({})", self.text_field_name, text)
+            format!("(~@{}:({}))", self.text_field_name, text)
         };
 
         // Append KNN vector part
@@ -1818,6 +1881,9 @@ impl<'a> AggregateHybridQuery<'a> {
     }
 
     /// Builds the complete `FT.AGGREGATE` command for this query.
+    ///
+    /// Matches the Python `AggregateRequest.build_args()` ordering:
+    /// query_string → SCORER → ADDSCORES → LOAD → DIALECT → aggregate plan (APPLY/SORTBY) → PARAMS.
     pub fn build_aggregate_cmd(&self, index_name: &str) -> redis::Cmd {
         let query_string = self.build_query_string();
         let mut cmd = redis::cmd("FT.AGGREGATE");
@@ -1830,14 +1896,27 @@ impl<'a> AggregateHybridQuery<'a> {
         // ADDSCORES
         cmd.arg("ADDSCORES");
 
-        // APPLY: compute vector_similarity and text_score
+        // LOAD return fields (must come before DIALECT and aggregate plan).
+        // Python `AggregateRequest.load()` stores field names as-is (no @-prefix).
+        if !self.return_fields.is_empty() {
+            cmd.arg("LOAD");
+            cmd.arg(self.return_fields.len());
+            for field in &self.return_fields {
+                cmd.arg(field);
+            }
+        }
+
+        // DIALECT (comes after LOAD, before aggregate plan)
+        cmd.arg("DIALECT").arg(self.dialect);
+
+        // Aggregate plan: APPLY, SORTBY (appended after DIALECT, matching
+        // Python's `_aggregateplan` list which is built by `.apply()` / `.sort_by()`)
         cmd.arg("APPLY")
             .arg("(2 - @vector_distance)/2")
             .arg("AS")
             .arg("vector_similarity");
         cmd.arg("APPLY").arg("@__score").arg("AS").arg("text_score");
 
-        // APPLY: compute hybrid_score
         let hybrid_expr = format!(
             "{}*@text_score + {}*@vector_similarity",
             1.0 - self.alpha,
@@ -1848,7 +1927,6 @@ impl<'a> AggregateHybridQuery<'a> {
             .arg("AS")
             .arg("hybrid_score");
 
-        // SORTBY by hybrid_score DESC
         cmd.arg("SORTBY")
             .arg(2)
             .arg("@hybrid_score")
@@ -1856,19 +1934,7 @@ impl<'a> AggregateHybridQuery<'a> {
             .arg("MAX")
             .arg(self.num_results);
 
-        // LOAD return fields
-        if !self.return_fields.is_empty() {
-            cmd.arg("LOAD");
-            cmd.arg(self.return_fields.len());
-            for field in &self.return_fields {
-                cmd.arg(format!("@{}", field));
-            }
-        }
-
-        // DIALECT
-        cmd.arg("DIALECT").arg(self.dialect);
-
-        // PARAMS for the vector blob
+        // PARAMS for the vector blob (always last)
         cmd.arg("PARAMS")
             .arg(2)
             .arg("vector")
@@ -2213,7 +2279,7 @@ mod tests {
         assert!(cmd_str.contains("FT.HYBRID"));
         assert!(cmd_str.contains("my_index"));
         assert!(cmd_str.contains("@description:(a medical professional)"));
-        assert!(cmd_str.contains("COMBINE_METHOD"));
+        assert!(cmd_str.contains("COMBINE"));
         assert!(cmd_str.contains("RRF"));
         assert!(cmd_str.contains("YIELD_SCORE_AS"));
         assert!(cmd_str.contains("hybrid_score"));
@@ -2233,7 +2299,7 @@ mod tests {
         let packed = cmd.get_packed_command();
         let cmd_str = String::from_utf8_lossy(&packed);
 
-        assert!(cmd_str.contains("COMBINE_METHOD"));
+        assert!(cmd_str.contains("COMBINE"));
         assert!(cmd_str.contains("RRF"));
         assert!(cmd_str.contains("WINDOW"));
         assert!(cmd_str.contains("CONSTANT"));
@@ -2248,7 +2314,7 @@ mod tests {
         let packed = cmd.get_packed_command();
         let cmd_str = String::from_utf8_lossy(&packed);
 
-        assert!(cmd_str.contains("COMBINE_METHOD"));
+        assert!(cmd_str.contains("COMBINE"));
         assert!(cmd_str.contains("LINEAR"));
         assert!(cmd_str.contains("ALPHA"));
     }
@@ -2428,7 +2494,13 @@ mod tests {
         .with_num_results(10);
 
         let qs = query.build_query_string();
-        assert!(qs.contains("@description:(a medical professional with expertise in lung cancer)"));
+        // Python produces: (~@description:(medical | professional | ...))=>[KNN ...]
+        // Default stopwords remove "a", "with", "in"
+        assert!(
+            qs.contains("~@description:("),
+            "should use ~ (optional) prefix: {qs}"
+        );
+        assert!(qs.contains(" | "), "tokens should be OR-joined: {qs}");
         assert!(qs.contains("=>[KNN 10 @user_embedding $vector AS vector_distance]"));
     }
 
@@ -2735,8 +2807,16 @@ mod tests {
         .with_filter(filter);
 
         let qs = query.build_query_string();
-        assert!(qs.contains("@description:(search for document 12345)"));
-        assert!(qs.contains("@category:{tech|science|engineering}"));
+        // Python produces: (~@description:(search | for | document | 12345) AND @category:{...})
+        // Our default has no stopwords set, so all tokens are preserved.
+        assert!(
+            qs.contains("~@description:(search | for | document | 12345)"),
+            "tokens should be OR-joined with ~ prefix: {qs}"
+        );
+        assert!(
+            qs.contains("AND @category:{tech|science|engineering}"),
+            "filter should be AND-joined: {qs}"
+        );
     }
 
     #[test]

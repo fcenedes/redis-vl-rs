@@ -740,7 +740,8 @@ fn python_test_vector_range_query_filters_and_pagination() {
 
     let results = index.query(&query).expect("query should succeed");
     let documents = results.as_documents().expect("documents");
-    assert_eq!(documents.len(), 2);
+    // 3 docs have credit_score=high within the vector range
+    assert_eq!(documents.len(), 3);
     assert!(
         documents
             .iter()

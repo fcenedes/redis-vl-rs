@@ -750,28 +750,21 @@ impl SearchIndex {
         Ok(batches)
     }
 
-    /// Executes a [`crate::query::HybridQuery`] via `FT.HYBRID` and returns parsed search
-    /// results.
+    /// Executes a [`crate::query::HybridQuery`] via `FT.HYBRID` and returns processed
+    /// documents.
     ///
     /// Requires Redis 8.4.0+ with the hybrid search capability.
-    pub fn hybrid_search(&self, query: &crate::query::HybridQuery<'_>) -> Result<SearchResult> {
+    ///
+    /// FT.HYBRID returns a distinct response format (map-like with
+    /// `total_results`, `results`, `warnings`, `execution_time`) that differs
+    /// from the FT.SEARCH array format. This method uses
+    /// `parse_hybrid_result` to decode it.
+    pub fn hybrid_query(&self, query: &crate::query::HybridQuery<'_>) -> Result<QueryOutput> {
         let client = self.connection.client()?;
         let mut connection = client.get_connection()?;
         let cmd = query.build_cmd(self.name());
         let value: redis::Value = cmd.query(&mut connection)?;
-        parse_search_result(value)
-    }
-
-    /// Executes a [`crate::query::HybridQuery`] via `FT.HYBRID` and returns processed
-    /// documents.
-    pub fn hybrid_query(&self, query: &crate::query::HybridQuery<'_>) -> Result<QueryOutput> {
-        let results = self.hybrid_search(query)?;
-        let mut documents = Vec::with_capacity(results.docs.len());
-        for document in results.docs {
-            let mut map = document.into_map();
-            map.remove("payload");
-            documents.push(map);
-        }
+        let documents = parse_hybrid_result(value)?;
         Ok(QueryOutput::Documents(documents))
     }
 
@@ -1531,30 +1524,15 @@ impl AsyncSearchIndex {
     }
 
     /// Executes a [`crate::query::HybridQuery`] asynchronously via `FT.HYBRID` and returns
-    /// parsed search results.
+    /// processed documents.
     ///
     /// Requires Redis 8.4.0+ with the hybrid search capability.
-    pub async fn hybrid_search(
-        &self,
-        query: &crate::query::HybridQuery<'_>,
-    ) -> Result<SearchResult> {
+    pub async fn hybrid_query(&self, query: &crate::query::HybridQuery<'_>) -> Result<QueryOutput> {
         let client = self.connection.client()?;
         let mut connection = client.get_multiplexed_async_connection().await?;
         let cmd = query.build_cmd(self.name());
         let value: redis::Value = cmd.query_async(&mut connection).await?;
-        parse_search_result(value)
-    }
-
-    /// Executes a [`crate::query::HybridQuery`] asynchronously via `FT.HYBRID` and returns
-    /// processed documents.
-    pub async fn hybrid_query(&self, query: &crate::query::HybridQuery<'_>) -> Result<QueryOutput> {
-        let results = self.hybrid_search(query).await?;
-        let mut documents = Vec::with_capacity(results.docs.len());
-        for document in results.docs {
-            let mut map = document.into_map();
-            map.remove("payload");
-            documents.push(map);
-        }
+        let documents = parse_hybrid_result(value)?;
         Ok(QueryOutput::Documents(documents))
     }
 
@@ -1850,6 +1828,79 @@ fn parse_search_result(value: redis::Value) -> Result<SearchResult> {
     Ok(SearchResult::new(total, docs))
 }
 
+/// Parses an `FT.HYBRID` response.
+///
+/// FT.HYBRID returns a map-like array:
+/// ```text
+/// ["total_results", <int>, "results", [[field, value, ...], ...], "warnings", [...], "execution_time", "..."]
+/// ```
+///
+/// Each result document is a flat array of `[field, value, field, value, ...]`
+/// with no separate document ID.
+fn parse_hybrid_result(value: redis::Value) -> Result<Vec<Map<String, Value>>> {
+    let entries = match value {
+        redis::Value::Array(entries) => entries,
+        redis::Value::Nil => return Ok(Vec::new()),
+        other => {
+            return Err(Error::InvalidInput(format!(
+                "expected FT.HYBRID array response, received {other:?}"
+            )));
+        }
+    };
+
+    // Parse the top-level map: walk key-value pairs.
+    let mut results_value: Option<redis::Value> = None;
+    let mut iter = entries.into_iter();
+    while let Some(key) = iter.next() {
+        let key_str = redis_value_to_string(&key).unwrap_or_default();
+        let val = iter.next();
+        match key_str.as_str() {
+            "results" => {
+                results_value = val;
+            }
+            _ => {
+                // Skip total_results, warnings, execution_time, etc.
+            }
+        }
+    }
+
+    let results_array = match results_value {
+        Some(redis::Value::Array(arr)) => arr,
+        Some(redis::Value::Nil) | None => return Ok(Vec::new()),
+        Some(other) => {
+            return Err(Error::InvalidInput(format!(
+                "expected results array in FT.HYBRID response, received {other:?}"
+            )));
+        }
+    };
+
+    let mut documents = Vec::with_capacity(results_array.len());
+    for entry in results_array {
+        match entry {
+            redis::Value::Array(pairs) => {
+                let mut map = Map::new();
+                let mut pair_iter = pairs.into_iter();
+                while let Some(field_val) = pair_iter.next() {
+                    let field = redis_value_to_string(&field_val)?;
+                    if let Some(value_val) = pair_iter.next() {
+                        let json_val = redis_value_to_json(value_val)?;
+                        // Skip internal fields like __key, __score
+                        if !field.starts_with("__") {
+                            map.insert(field, json_val);
+                        }
+                    }
+                }
+                documents.push(map);
+            }
+            _ => {
+                // Skip non-array entries
+            }
+        }
+    }
+
+    Ok(documents)
+}
+
 fn parse_info_response(value: redis::Value) -> Result<Map<String, Value>> {
     let entries = match value {
         redis::Value::Map(entries) => entries,
@@ -2127,6 +2178,15 @@ fn schema_from_info(name: &str, info: &Map<String, Value>) -> Result<IndexSchema
                 .strip_prefix("$.")
                 .unwrap_or(&field_name)
                 .to_owned();
+
+            // Normalize Redis Search defaults back to None so that
+            // schemas reconstructed from FT.INFO compare equal to
+            // schemas built from JSON/YAML where optional defaults
+            // are omitted.  Redis returns separator="," for TAG fields
+            // and weight=1 for TEXT fields even when they were not
+            // explicitly set during FT.CREATE.
+            let separator = separator.filter(|s| s != ",");
+            let weight = weight.filter(|w| (*w - 1.0).abs() > f32::EPSILON);
 
             let kind = match field_type.as_str() {
                 "TAG" => FieldKind::Tag {
@@ -2940,6 +3000,243 @@ mod tests {
         assert_eq!(index.prefix(), "pfx_a");
         // create_cmd is exercised end-to-end via integration tests.
         let _cmd = index.create_cmd();
+    }
+
+    // ── schema_from_info default-normalization tests ──
+
+    #[test]
+    fn schema_from_info_should_normalize_tag_separator_default() {
+        // Redis FT.INFO always reports SEPARATOR "," for tag fields even when
+        // the field was created without an explicit separator. The reconstructed
+        // schema must treat the Redis default (,) as None so that comparison
+        // with an original JSON-built schema succeeds.
+        let mut info = Map::new();
+        info.insert(
+            "index_definition".to_owned(),
+            json!(["key_type", "HASH", "prefixes", ["test"]]),
+        );
+        info.insert(
+            "attributes".to_owned(),
+            json!([[
+                "identifier",
+                "brand",
+                "attribute",
+                "brand",
+                "type",
+                "TAG",
+                "SEPARATOR",
+                ","
+            ]]),
+        );
+
+        let schema = schema_from_info("norm_test", &info).expect("should parse");
+        match &schema.fields[0].kind {
+            crate::schema::FieldKind::Tag { attrs } => {
+                assert!(
+                    attrs.separator.is_none(),
+                    "default separator ',' should be normalized to None, got {:?}",
+                    attrs.separator
+                );
+            }
+            other => panic!("expected tag field, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn schema_from_info_should_preserve_non_default_tag_separator() {
+        let mut info = Map::new();
+        info.insert(
+            "index_definition".to_owned(),
+            json!(["key_type", "HASH", "prefixes", ["test"]]),
+        );
+        info.insert(
+            "attributes".to_owned(),
+            json!([[
+                "identifier",
+                "brand",
+                "attribute",
+                "brand",
+                "type",
+                "TAG",
+                "SEPARATOR",
+                "|"
+            ]]),
+        );
+
+        let schema = schema_from_info("norm_test", &info).expect("should parse");
+        match &schema.fields[0].kind {
+            crate::schema::FieldKind::Tag { attrs } => {
+                assert_eq!(attrs.separator.as_deref(), Some("|"));
+            }
+            other => panic!("expected tag field, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn schema_from_info_should_normalize_text_weight_default() {
+        // Redis FT.INFO always reports WEIGHT 1 for text fields even when the
+        // field was created without an explicit weight.
+        let mut info = Map::new();
+        info.insert(
+            "index_definition".to_owned(),
+            json!(["key_type", "HASH", "prefixes", ["test"]]),
+        );
+        info.insert(
+            "attributes".to_owned(),
+            json!([[
+                "identifier",
+                "content",
+                "attribute",
+                "content",
+                "type",
+                "TEXT",
+                "WEIGHT",
+                "1"
+            ]]),
+        );
+
+        let schema = schema_from_info("norm_test", &info).expect("should parse");
+        match &schema.fields[0].kind {
+            crate::schema::FieldKind::Text { attrs } => {
+                assert!(
+                    attrs.weight.is_none(),
+                    "default weight 1.0 should be normalized to None, got {:?}",
+                    attrs.weight
+                );
+            }
+            other => panic!("expected text field, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn schema_from_info_should_preserve_non_default_text_weight() {
+        let mut info = Map::new();
+        info.insert(
+            "index_definition".to_owned(),
+            json!(["key_type", "HASH", "prefixes", ["test"]]),
+        );
+        info.insert(
+            "attributes".to_owned(),
+            json!([[
+                "identifier",
+                "content",
+                "attribute",
+                "content",
+                "type",
+                "TEXT",
+                "WEIGHT",
+                "2.5"
+            ]]),
+        );
+
+        let schema = schema_from_info("norm_test", &info).expect("should parse");
+        match &schema.fields[0].kind {
+            crate::schema::FieldKind::Text { attrs } => {
+                assert_eq!(attrs.weight, Some(2.5));
+            }
+            other => panic!("expected text field, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn schema_from_info_json_roundtrip_should_match_original_schema() {
+        // Simulates the semantic router / message history reconnect scenario:
+        // an original schema built from JSON should match a schema reconstructed
+        // from FT.INFO output where Redis adds default separator and weight.
+        let original = IndexSchema::from_json_value(json!({
+            "index": {
+                "name": "my_router",
+                "prefix": "my_router",
+                "storage_type": "hash"
+            },
+            "fields": [
+                { "name": "ref_id", "type": "tag" },
+                { "name": "route", "type": "tag" },
+                { "name": "reference", "type": "text" },
+                {
+                    "name": "vector",
+                    "type": "vector",
+                    "attrs": {
+                        "algorithm": "flat",
+                        "dims": 3,
+                        "datatype": "float32",
+                        "distance_metric": "cosine"
+                    }
+                }
+            ]
+        }))
+        .expect("original schema should parse");
+
+        // Simulate FT.INFO output with Redis defaults explicitly present
+        let mut info = Map::new();
+        info.insert(
+            "index_definition".to_owned(),
+            json!(["key_type", "HASH", "prefixes", ["my_router"]]),
+        );
+        info.insert(
+            "attributes".to_owned(),
+            json!([
+                [
+                    "identifier",
+                    "ref_id",
+                    "attribute",
+                    "ref_id",
+                    "type",
+                    "TAG",
+                    "SEPARATOR",
+                    ","
+                ],
+                [
+                    "identifier",
+                    "route",
+                    "attribute",
+                    "route",
+                    "type",
+                    "TAG",
+                    "SEPARATOR",
+                    ","
+                ],
+                [
+                    "identifier",
+                    "reference",
+                    "attribute",
+                    "reference",
+                    "type",
+                    "TEXT",
+                    "WEIGHT",
+                    "1"
+                ],
+                [
+                    "identifier",
+                    "vector",
+                    "attribute",
+                    "vector",
+                    "type",
+                    "VECTOR",
+                    "FLAT",
+                    "6",
+                    "TYPE",
+                    "FLOAT32",
+                    "DIM",
+                    "3",
+                    "DISTANCE_METRIC",
+                    "COSINE"
+                ]
+            ]),
+        );
+        let reconstructed =
+            schema_from_info("my_router", &info).expect("reconstructed schema should parse");
+
+        let original_json = original.to_json_value().expect("original to_json_value");
+        let reconstructed_json = reconstructed
+            .to_json_value()
+            .expect("reconstructed to_json_value");
+        assert_eq!(
+            original_json, reconstructed_json,
+            "original and reconstructed schemas should match after normalization\n\
+             original:      {original_json:#}\n\
+             reconstructed: {reconstructed_json:#}"
+        );
     }
 
     #[test]
