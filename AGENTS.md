@@ -4,7 +4,7 @@ This file is the working source of truth for the RedisVL Rust implementation.It 
 
 ## Current Status
 
-Last updated: `2026-03-27`
+Last updated: `2026-03-28`
 
 The repository is past scaffolding and into real parity work.
 
@@ -46,7 +46,7 @@ The biggest remaining gaps are:
 - Anthropic vectorizer adapter (deferred)
 - richer CLI parity and CLI tests
 - Rust-vs-Python comparison benchmark runs
-- provider-dependent dtype/default-vectorizer/from-existing parity for semantic extensions (deferred pending provider work)
+- provider-dependent default-vectorizer selection for semantic extensions (deferred pending provider work)
 - vector/geo aggregate SQL functions (deferred)
 - examples and docs expansion
 
@@ -147,8 +147,8 @@ Important caution for a takeover session:
 
 - `HybridQuery`, `AggregateHybridQuery`, and `MultiVectorQuery` command buildersare implemented and covered by environment-gated Redis 8.4 integration tests in`python_parity_hybrid_aggregate.rs`; these require a Redis 8.4+ server with`FT.HYBRID` and `FT.AGGREGATE` support
 - `SQLQuery` covers both non-aggregate SELECT queries and aggregate SQL(`COUNT`, `SUM`, `AVG`, `GROUP BY`, etc.) with automatic `FT.SEARCH`/`FT.AGGREGATE`dispatch in `SearchIndex::sql_query` and `AsyncSearchIndex::sql_query`;vector/geo aggregate functions are not yet supported
-- `SemanticMessageHistory` exists, but Python features around dtype/defaultvectorizers/reconnection/from-existing are still missing
-- `SemanticRouter` exists, but Python features around serialization helpers,route reference management, dtype/default vectorizers, and from-existing stylebehavior are still missing
+- `SemanticMessageHistory` has full dtype support, overwrite/reconnect with schema mismatch detection, and parity tests; provider-dependent default-vectorizer selection is deferred
+- `SemanticRouter` has full dtype support, overwrite/reconnect with schema mismatch detection, `from_existing`, `from_dict`, `from_yaml`, `to_dict`/`to_json_value` serialization, and route reference management with parity tests; provider-dependent default-vectorizer selection is deferred
 - Multi-prefix schema parsing and index creation are implemented; key compositionfor multi-prefix loading uses the first prefix
 
 ## Summary
@@ -225,8 +225,8 @@ This table is the compact handoff view. `PARITY_MATRIX.md` should stay alignedwi
 | Semantic cache | **Complete** | Redis-backed sync/async core implemented and parity-tested (19 integration tests) | — |
 | Embeddings cache | **Complete** | Redis-backed sync/async core implemented and parity-tested (12 integration tests) | — |
 | Message history | **Complete** | Standard history implemented with role filtering and parity tests (4 history + 3 role-filter tests) | — |
-| Semantic message history | **Complete** | Semantic history implemented and parity-tested (7 integration tests). Provider-dependent dtype/default-vectorizer/from-existing parity is deferred | Provider-dependent defaults (deferred) |
-| Router | **Complete** | Redis-backed routing/update/lifecycle core implemented and parity-tested (20 integration tests). Provider-dependent dtype/default-vectorizer/from-existing parity and serialization helpers are deferred | Provider-dependent defaults (deferred) |
+| Semantic message history | **Complete** | Semantic history implemented and parity-tested (7 integration tests); dtype selection, overwrite control, and reconnect with schema mismatch detection are implemented. Provider-dependent default-vectorizer selection is deferred | Provider-dependent defaults (deferred) |
+| Router | **Complete** | Redis-backed routing/update/lifecycle core implemented and parity-tested (20 integration tests); dtype selection, overwrite control, reconnect with schema mismatch detection, `from_existing`, `from_dict`/`from_yaml` serialization, and route reference management are implemented. Provider-dependent default-vectorizer selection is deferred | Provider-dependent defaults (deferred) |
 | CLI | In progress | Basic command surface implemented (5 CLI smoke tests) | More Python CLI parity, tests, and UX polishing |
 | Rerankers | **Complete** | Reranker/AsyncReranker traits and CohereReranker behind rerankers feature | Additional reranker providers |
 | Benchmarks | In progress | Criterion micro-benchmarks for schema/filter/query; Redis-backed benchmarks for search index ops, vector/filter/count/batch/paginate search, embeddings cache, semantic cache, message history, and semantic history | Rust-vs-Python comparison runner |
@@ -290,12 +290,11 @@ This table is the compact handoff view. `PARITY_MATRIX.md` should stay alignedwi
 If a new agent/session takes over, the recommended order is:
 
 1. Remaining vectorizer providersAdd Vertex AI, Bedrock, and HuggingFace local vectorizers
-2. Search-index/key-construction edge casesContinue from `tests/integration/test_key_separator_handling.py` and relatedschema/index tests
-3. CLI parity and CLI testsExpand `crates/rvl/src/main.rs` and add CLI-focused tests mirroring Python CLIexpectations where possible
-4. Semantic extension parityAdd dtype/default-vectorizer/from-existing/reconnection support to`SemanticMessageHistory` and `SemanticRouter`
-5. Vector/geo aggregate SQL functionsExtend aggregate SQL support in `crates/redis-vl/src/query/sql.rs` to covervector distance and geo functions
-6. Rust-vs-Python benchmark comparison runner
-7. Examples and docs expansion
+2. CLI parity and CLI testsExpand `crates/rvl/src/main.rs` and add CLI-focused tests mirroring Python CLIexpectations where possible
+3. Provider-dependent semantic defaultsAdd default-vectorizer selection to `SemanticCache`, `SemanticMessageHistory`, and `SemanticRouter` once more providers are available
+4. Vector/geo aggregate SQL functionsExtend aggregate SQL support in `crates/redis-vl/src/query/sql.rs` to covervector distance and geo functions
+5. Rust-vs-Python benchmark comparison runner
+6. Examples and docs expansion
 
 ## Takeover Checklist
 

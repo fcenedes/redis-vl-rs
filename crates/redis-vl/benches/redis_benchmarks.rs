@@ -10,15 +10,17 @@
 //! The benchmarks use a test Redis database and clean up after themselves.
 #![allow(missing_docs)]
 
-use std::{hint::black_box, sync::atomic::{AtomicUsize, Ordering}};
+use std::{
+    hint::black_box,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use redis_vl::{
-    IndexSchema, SearchIndex, Vector, VectorQuery, FilterQuery, CountQuery,
-    filter::{Tag, Num},
-    EmbeddingsCache, SemanticCache, MessageHistory, SemanticMessageHistory, CacheConfig,
+    CacheConfig, CountQuery, EmbeddingsCache, FilterQuery, IndexSchema, Message, MessageHistory,
+    MessageRole, SearchIndex, SemanticCache, SemanticMessageHistory, Vector, VectorQuery,
+    filter::{Num, Tag},
     vectorizers::CustomTextVectorizer,
-    Message, MessageRole,
 };
 use serde_json::{Value, json};
 
@@ -348,7 +350,8 @@ fn bench_search_filter(c: &mut Criterion) {
     });
 
     c.bench_function("search_filter_compound", |b| {
-        let filter = Tag::new("title").eq("category-5") & Num::new("score").between(100.0, 300.0, redis_vl::BetweenInclusivity::Both);
+        let filter = Tag::new("title").eq("category-5")
+            & Num::new("score").between(100.0, 300.0, redis_vl::BetweenInclusivity::Both);
         let query = FilterQuery::new(filter);
         b.iter(|| {
             black_box(index.search(&query).unwrap());
@@ -431,11 +434,15 @@ fn bench_search_batch(c: &mut Criterion) {
             .collect();
 
         group.throughput(Throughput::Elements(*count as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(count), &queries, |b, queries| {
-            b.iter(|| {
-                black_box(index.batch_search(queries.iter()).unwrap());
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::from_parameter(count),
+            &queries,
+            |b, queries| {
+                b.iter(|| {
+                    black_box(index.batch_search(queries.iter()).unwrap());
+                });
+            },
+        );
     }
     group.finish();
 
@@ -497,7 +504,13 @@ fn bench_embeddings_cache_set(c: &mut Criterion) {
         let embedding = vec![0.1_f32; 128];
         b.iter(|| {
             cache
-                .set("test content", "text-embedding-ada-002", black_box(&embedding), None, None)
+                .set(
+                    "test content",
+                    "text-embedding-ada-002",
+                    black_box(&embedding),
+                    None,
+                    None,
+                )
                 .unwrap();
         });
     });
@@ -521,12 +534,22 @@ fn bench_embeddings_cache_get_hit(c: &mut Criterion) {
     // Pre-populate
     let embedding = vec![0.1_f32; 128];
     cache
-        .set("cached content", "text-embedding-ada-002", &embedding, None, None)
+        .set(
+            "cached content",
+            "text-embedding-ada-002",
+            &embedding,
+            None,
+            None,
+        )
         .unwrap();
 
     c.bench_function("embedcache_get_hit", |b| {
         b.iter(|| {
-            black_box(cache.get("cached content", "text-embedding-ada-002").unwrap());
+            black_box(
+                cache
+                    .get("cached content", "text-embedding-ada-002")
+                    .unwrap(),
+            );
         });
     });
 
@@ -547,7 +570,11 @@ fn bench_embeddings_cache_get_miss(c: &mut Criterion) {
 
     c.bench_function("embedcache_get_miss", |b| {
         b.iter(|| {
-            black_box(cache.get("uncached content", "text-embedding-ada-002").unwrap());
+            black_box(
+                cache
+                    .get("uncached content", "text-embedding-ada-002")
+                    .unwrap(),
+            );
         });
     });
 
@@ -578,12 +605,21 @@ fn bench_semantic_cache_store(c: &mut Criterion) {
     };
     let cache = SemanticCache::new(config, 0.3, 128)
         .unwrap()
-        .with_vectorizer(CustomTextVectorizer::new(|text| Ok(simple_vectorizer(text))));
+        .with_vectorizer(CustomTextVectorizer::new(|text| {
+            Ok(simple_vectorizer(text))
+        }));
 
     c.bench_function("semcache_store", |b| {
         b.iter(|| {
             cache
-                .store("what is the capital of France?", "Paris", None, None, None, None)
+                .store(
+                    "what is the capital of France?",
+                    "Paris",
+                    None,
+                    None,
+                    None,
+                    None,
+                )
                 .unwrap();
         });
     });
@@ -603,16 +639,36 @@ fn bench_semantic_cache_check_hit(c: &mut Criterion) {
     };
     let cache = SemanticCache::new(config, 0.3, 128)
         .unwrap()
-        .with_vectorizer(CustomTextVectorizer::new(|text| Ok(simple_vectorizer(text))));
+        .with_vectorizer(CustomTextVectorizer::new(|text| {
+            Ok(simple_vectorizer(text))
+        }));
 
     // Pre-populate
     cache
-        .store("what is the capital of France?", "Paris", None, None, None, None)
+        .store(
+            "what is the capital of France?",
+            "Paris",
+            None,
+            None,
+            None,
+            None,
+        )
         .unwrap();
 
     c.bench_function("semcache_check_hit", |b| {
         b.iter(|| {
-            black_box(cache.check(Some("what is the capital of France?"), None, 1, None, None, None).unwrap());
+            black_box(
+                cache
+                    .check(
+                        Some("what is the capital of France?"),
+                        None,
+                        1,
+                        None,
+                        None,
+                        None,
+                    )
+                    .unwrap(),
+            );
         });
     });
 
@@ -631,11 +687,24 @@ fn bench_semantic_cache_check_miss(c: &mut Criterion) {
     };
     let cache = SemanticCache::new(config, 0.3, 128)
         .unwrap()
-        .with_vectorizer(CustomTextVectorizer::new(|text| Ok(simple_vectorizer(text))));
+        .with_vectorizer(CustomTextVectorizer::new(|text| {
+            Ok(simple_vectorizer(text))
+        }));
 
     c.bench_function("semcache_check_miss", |b| {
         b.iter(|| {
-            black_box(cache.check(Some("completely different query"), None, 1, None, None, None).unwrap());
+            black_box(
+                cache
+                    .check(
+                        Some("completely different query"),
+                        None,
+                        1,
+                        None,
+                        None,
+                        None,
+                    )
+                    .unwrap(),
+            );
         });
     });
 
@@ -803,11 +872,7 @@ criterion_group!(
     bench_search_vector_with_filter,
 );
 
-criterion_group!(
-    search_filter_count,
-    bench_search_filter,
-    bench_search_count,
-);
+criterion_group!(search_filter_count, bench_search_filter, bench_search_count,);
 
 criterion_group!(
     search_batch_pagination,
