@@ -2,14 +2,66 @@ name: Benchmarks
 
 on:
   workflow_dispatch:
+    inputs:
+      run_redis:
+        description: "Run Redis-backed benchmarks (requires Redis service)"
+        type: boolean
+        default: false
+      run_comparison:
+        description: "Run Rust-vs-Python comparison"
+        type: boolean
+        default: false
 
 jobs:
-  bench:
+  bench-core:
+    name: Core (Rust-only) Benchmarks
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Run benches
-        run: cargo bench --workspace || true
+      - name: Run core benches
+        run: cargo bench -p redis-vl --bench core_benchmarks
+      - name: Upload Criterion reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-core
+          path: target/criterion/
+
+  bench-comparison:
+    name: Rust-vs-Python Comparison
+    if: ${{ inputs.run_comparison }}
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis/redis-stack-server:latest
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install Python deps
+        run: pip install -r benches/python/requirements.txt
+      - name: Run comparison (core only)
+        if: ${{ !inputs.run_redis }}
+        run: benches/compare.sh --verbose
+      - name: Run comparison (core + Redis)
+        if: ${{ inputs.run_redis }}
+        env:
+          REDIS_URL: redis://localhost:6379
+        run: benches/compare.sh --redis --verbose
+      - name: Upload comparison results
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-comparison
+          path: target/bench-compare/
 

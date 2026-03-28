@@ -1,0 +1,5 @@
+# Python dependencies for Rust-vs-Python benchmark comparison.
+# Install with: pip install -r benches/python/requirements.txt
+redisvl>=0.4.0
+numpy
+pyyaml

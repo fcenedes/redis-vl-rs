@@ -54,8 +54,69 @@ Criterion generates HTML reports in `target/criterion/`:
 open target/criterion/report/index.html
 ```
 
-## Python comparison
+## Rust-vs-Python Comparison
 
-A Rust-vs-Python comparison harness is planned but not yet implemented. The
-goal is to measure relative performance for schema parsing, query compilation,
-and Redis round-trip operations across both libraries.
+A comparison harness runs equivalent benchmarks in both Rust (Criterion) and
+Python (redisvl) and generates a side-by-side Markdown report.
+
+### Prerequisites
+
+- Python 3.10+ with redisvl installed:
+
+```bash
+pip install -r benches/python/requirements.txt
+```
+
+### Running
+
+```bash
+# Core benchmarks only (no Redis required)
+benches/compare.sh
+
+# Include Redis-backed benchmarks (requires Redis 8+ / Redis Stack)
+benches/compare.sh --redis
+
+# With progress output
+benches/compare.sh --verbose
+```
+
+### Environment Variables
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `REDIS_URL` | `redis://127.0.0.1:6379` | Redis connection URL |
+| `PYTHON` | `python3` | Python interpreter path |
+| `CARGO_BENCH_ARGS` | *(empty)* | Extra flags passed to `cargo bench` |
+
+### Output
+
+The runner saves raw JSON results in `target/bench-compare/` and prints a
+Markdown comparison table to stdout. The table shows each benchmark's mean
+time for Rust and Python, plus the ratio (Py÷Rust; values > 1× mean Rust is
+faster).
+
+### Covered operations
+
+| Category | Benchmarks |
+| --- | --- |
+| Schema | YAML parse, JSON parse, YAML serialize |
+| Filters | Simple tag, compound, negated |
+| Queries | Vector query build, vector+filter query build |
+| Index lifecycle | Create, exists, info |
+| Load/fetch | Single load, batch load (100), single fetch |
+| Search | Vector k=10, vector+filter, filter-only, count |
+| Semantic cache | Store, check hit, check miss |
+
+### Python benchmark files
+
+| File | Description |
+| --- | --- |
+| `python/bench_harness.py` | Shared timing/reporting framework |
+| `python/bench_core.py` | Pure-Python benchmarks (schema, filter, query) |
+| `python/bench_redis.py` | Redis-backed benchmarks |
+| `python/compare_report.py` | Report generator |
+
+### CI
+
+The `bench.yml` workflow provides a manual `workflow_dispatch` trigger with
+optional `run_comparison` and `run_redis` inputs.
