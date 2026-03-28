@@ -5,17 +5,51 @@ on:
     branches: ["main"]
   workflow_dispatch:
 
+# Allow only one concurrent deployment
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
 jobs:
-  docs:
+  build:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+
       - name: Install mdBook
         run: cargo install mdbook --locked
-      - name: Build book
+
+      - name: Build mdBook site
         run: mdbook build docs
-      - name: Build API docs
+
+      - name: Build API docs (cargo doc)
         run: cargo doc --workspace --all-features --no-deps
 
+      # Merge: mdBook output is the site root, cargo doc output goes under /api
+      - name: Merge mdBook and API docs
+        run: |
+          mkdir -p docs/book/api
+          cp -r target/doc/* docs/book/api/
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/book
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

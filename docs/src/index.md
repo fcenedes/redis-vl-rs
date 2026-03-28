@@ -19,12 +19,19 @@ for detailed coverage against the Python surface.
 | `index` | Sync and async search index lifecycle, hybrid search, aggregate queries, multi-vector queries |
 | `filter` | Composable filter DSL (Tag, Text, Num, Geo, Timestamp) |
 | `query` | Vector, range, text, filter, count, hybrid, aggregate hybrid, multi-vector, and SQL queries |
-| `vectorizers` | OpenAI, LiteLLM, Custom, Azure OpenAI, Cohere, VoyageAI, and Mistral vectorizers |
+| `vectorizers` | OpenAI, LiteLLM, Custom, Azure OpenAI, Cohere, VoyageAI, Mistral, Anthropic, and HuggingFace local vectorizers |
 | `rerankers` | Reranker traits and Cohere reranker |
-| `extensions` | Embeddings cache, semantic cache, message history, semantic router |
+| `extensions` | Embeddings cache, semantic cache, message history, semantic message history, semantic router |
 
 ## Prerequisites
 
 - Rust 1.85+
 - Redis 8+ or Redis Stack (for Search module)
+
+## Links
+
+- [API Reference (rustdoc)](api/redis_vl/index.html)
+- [GitHub Repository](https://github.com/redis/redis-vl-rs)
+- [Parity Matrix](https://github.com/redis/redis-vl-rs/blob/main/PARITY_MATRIX.md)
+- [docs.rs](https://docs.rs/redis-vl)
 

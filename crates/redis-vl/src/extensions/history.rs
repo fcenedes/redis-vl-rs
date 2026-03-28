@@ -1,12 +1,13 @@
 //! Message history extension types.
 //!
-//! [`MessageHistory`] stores conversation messages in Redis with ordered
-//! retrieval, role-based filtering, and session management. Messages are
-//! stored as Redis hashes under session-namespaced keys.
+//! [`MessageHistory`](crate::MessageHistory) stores conversation messages in
+//! Redis with ordered retrieval, role-based filtering, and session management.
+//! Messages are stored as Redis hashes under session-namespaced keys.
 //!
-//! [`SemanticMessageHistory`] extends `MessageHistory` with vector-based
-//! semantic recall — in addition to ordered retrieval, it finds the most
-//! relevant past messages for a given prompt using vector similarity search.
+//! [`SemanticMessageHistory`](crate::SemanticMessageHistory) extends
+//! `MessageHistory` with vector-based semantic recall — in addition to ordered
+//! retrieval, it finds the most relevant past messages for a given prompt using
+//! vector similarity search.
 
 use std::sync::Arc;
 

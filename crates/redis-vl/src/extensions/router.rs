@@ -1,12 +1,14 @@
 //! Semantic router extension types.
 //!
-//! [`SemanticRouter`] classifies input text against predefined [`Route`]s using
-//! vector similarity. Each route is defined by a set of reference utterances;
-//! incoming text is embedded and matched against the closest references.
+//! [`SemanticRouter`](crate::SemanticRouter) classifies input text against
+//! predefined [`Route`](crate::Route)s using vector similarity. Each route is
+//! defined by a set of reference utterances; incoming text is embedded and
+//! matched against the closest references.
 //!
 //! The router supports per-route distance thresholds, configurable aggregation
-//! methods ([`DistanceAggregationMethod`]), serialization to/from YAML and JSON,
-//! and `from_existing` reconnection to a previously created router index.
+//! methods ([`DistanceAggregationMethod`](crate::DistanceAggregationMethod)),
+//! serialization to/from YAML and JSON, and `from_existing` reconnection to a
+//! previously created router index.
 
 use std::{collections::HashMap, path::Path, sync::Arc};
 

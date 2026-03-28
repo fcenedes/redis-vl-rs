@@ -1,7 +1,15 @@
 [book]
 authors = ["RedisVL Rust Contributors"]
 language = "en"
-multilingual = false
 src = "src"
 title = "RedisVL Rust"
+
+[output.html]
+git-repository-url = "https://github.com/redis/redis-vl-rs"
+edit-url-template = "https://github.com/redis/redis-vl-rs/edit/main/docs/{path}"
+no-section-label = false
+
+[output.html.fold]
+enable = true
+level = 1
 

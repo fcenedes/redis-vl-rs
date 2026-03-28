@@ -2,20 +2,20 @@
 //!
 //! This module contains Redis-backed AI extensions:
 //!
-//! - [`cache`] – [`EmbeddingsCache`](cache::EmbeddingsCache) for deterministic
-//!   embedding storage and [`SemanticCache`](cache::SemanticCache) for LLM
+//! - `cache` – [`EmbeddingsCache`](crate::EmbeddingsCache) for deterministic
+//!   embedding storage and [`SemanticCache`](crate::SemanticCache) for LLM
 //!   response caching with semantic similarity lookup.
-//! - [`history`] – [`MessageHistory`](history::MessageHistory) for conversation
-//!   storage and [`SemanticMessageHistory`](history::SemanticMessageHistory)
+//! - `history` – [`MessageHistory`](crate::MessageHistory) for conversation
+//!   storage and [`SemanticMessageHistory`](crate::SemanticMessageHistory)
 //!   for vector-based semantic recall of past messages.
-//! - [`router`] – [`SemanticRouter`](router::SemanticRouter) for classifying
+//! - `router` – [`SemanticRouter`](crate::SemanticRouter) for classifying
 //!   input text against predefined routes using vector similarity.
 
-/// Cache-related extensions: [`EmbeddingsCache`](cache::EmbeddingsCache) and
-/// [`SemanticCache`](cache::SemanticCache).
+/// Cache-related extensions: [`EmbeddingsCache`](crate::EmbeddingsCache) and
+/// [`SemanticCache`](crate::SemanticCache).
 pub mod cache;
-/// Conversation history extensions: [`MessageHistory`](history::MessageHistory) and
-/// [`SemanticMessageHistory`](history::SemanticMessageHistory).
+/// Conversation history extensions: [`MessageHistory`](crate::MessageHistory) and
+/// [`SemanticMessageHistory`](crate::SemanticMessageHistory).
 pub mod history;
-/// Semantic routing: [`SemanticRouter`](router::SemanticRouter).
+/// Semantic routing: [`SemanticRouter`](crate::SemanticRouter).
 pub mod router;
