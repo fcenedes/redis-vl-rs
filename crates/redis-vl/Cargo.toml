@@ -29,6 +29,7 @@ thiserror.workspace = true
 tokio.workspace = true
 ulid.workspace = true
 url.workspace = true
+fastembed = { version = "5.13.0", optional = true }
 
 [features]
 default = ["openai", "litellm"]
@@ -37,11 +38,11 @@ litellm = ["openai"]
 azure-openai = ["openai"]
 cohere = []
 vertex-ai = []
-anthropic = []
+anthropic = ["voyageai"]
 voyageai = []
 mistral = []
 bedrock = []
-hf-local = []
+hf-local = ["dep:fastembed"]
 sql = []
 rerankers = []
 
