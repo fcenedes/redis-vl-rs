@@ -60,3 +60,12 @@ harness = false
 [[bench]]
 name = "redis_benchmarks"
 harness = false
+
+
+[[test]]
+name = "python_parity_sql_hash"
+required-features = ["sql"]
+
+[[test]]
+name = "python_parity_sql_json"
+required-features = ["sql"]
