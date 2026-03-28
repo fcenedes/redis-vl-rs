@@ -189,3 +189,128 @@ fn index_destroy_help_mentions_documents() {
         "destroy help should mention documents, got: {stdout}"
     );
 }
+
+// ── Top-level --version flag ───────────────────────────────────────────────
+
+#[test]
+fn top_level_version_flag() {
+    let output = rvl_bin()
+        .arg("--version")
+        .output()
+        .expect("failed to run rvl");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("rvl") || stdout.contains('.'),
+        "expected version output, got: {stdout}"
+    );
+}
+
+// ── Subcommand --version propagation ───────────────────────────────────────
+
+#[test]
+fn index_subcommand_version_flag() {
+    let output = rvl_bin()
+        .args(["index", "--version"])
+        .output()
+        .expect("failed to run rvl");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.trim().contains('.'),
+        "expected version in subcommand output, got: {stdout}"
+    );
+}
+
+// ── --json flag appears in help text ───────────────────────────────────────
+
+#[test]
+fn stats_help_shows_json_flag() {
+    let output = rvl_bin()
+        .args(["stats", "--help"])
+        .output()
+        .expect("failed to run rvl");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("--json"),
+        "stats help should mention --json flag, got: {stdout}"
+    );
+}
+
+#[test]
+fn index_info_help_shows_json_flag() {
+    let output = rvl_bin()
+        .args(["index", "info", "--help"])
+        .output()
+        .expect("failed to run rvl");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("--json"),
+        "info help should mention --json flag, got: {stdout}"
+    );
+}
+
+#[test]
+fn index_listall_help_shows_json_flag() {
+    let output = rvl_bin()
+        .args(["index", "listall", "--help"])
+        .output()
+        .expect("failed to run rvl");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("--json"),
+        "listall help should mention --json flag, got: {stdout}"
+    );
+}
+
+// ── --overwrite flag appears in create help ─────────────────────────────────
+
+#[test]
+fn index_create_help_shows_overwrite_flag() {
+    let output = rvl_bin()
+        .args(["index", "create", "--help"])
+        .output()
+        .expect("failed to run rvl");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("--overwrite"),
+        "create help should mention --overwrite flag, got: {stdout}"
+    );
+}
+
+// ── Error messages include context ─────────────────────────────────────────
+
+#[test]
+fn bad_schema_file_error_includes_path() {
+    let output = rvl_bin()
+        .args(["index", "create", "--schema", "/nonexistent/schema.yaml"])
+        .output()
+        .expect("failed to run rvl");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("/nonexistent/schema.yaml"),
+        "error should include the file path, got: {stderr}"
+    );
+}
+
+// ── index subcommand without subcommand shows help ─────────────────────────
+
+#[test]
+fn index_no_subcommand_shows_help() {
+    let output = rvl_bin()
+        .args(["index"])
+        .output()
+        .expect("failed to run rvl");
+    // With arg_required_else_help, clap exits with error code 2
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("Usage") || stderr.contains("create"),
+        "expected usage hint, got: {stderr}"
+    );
+}
