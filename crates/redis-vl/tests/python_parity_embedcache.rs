@@ -12,6 +12,12 @@ use serde_json::json;
 
 static COUNTER: AtomicU64 = AtomicU64::new(1);
 
+/// Per-process unique run identifier to prevent stale-data collisions across
+/// parallel test runs sharing the same Redis instance.
+fn run_id() -> u32 {
+    std::process::id()
+}
+
 fn integration_enabled() -> bool {
     std::env::var("REDISVL_RUN_INTEGRATION")
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
@@ -28,7 +34,8 @@ fn create_cache(ttl_seconds: Option<u64>) -> Option<EmbeddingsCache> {
     }
 
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let mut config = CacheConfig::new(format!("python_parity_embedcache_{id}"), redis_url());
+    let pid = run_id();
+    let mut config = CacheConfig::new(format!("python_parity_embedcache_{pid}_{id}"), redis_url());
     if let Some(ttl_seconds) = ttl_seconds {
         config = config.with_ttl(ttl_seconds);
     }

@@ -10,6 +10,12 @@ use serde_json::json;
 
 static COUNTER: AtomicU64 = AtomicU64::new(1);
 
+/// Per-process unique run identifier to prevent stale-data collisions across
+/// parallel test runs sharing the same Redis instance.
+fn run_id() -> u32 {
+    std::process::id()
+}
+
 fn integration_enabled() -> bool {
     std::env::var("REDISVL_RUN_INTEGRATION")
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
@@ -58,19 +64,23 @@ fn create_router() -> Option<SemanticRouter> {
     }
 
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-    Some(
-        SemanticRouter::new(
-            format!("python_parity_router_{id}"),
-            redis_url(),
-            routes(),
-            RoutingConfig {
-                max_k: 2,
-                aggregation_method: DistanceAggregationMethod::Avg,
-            },
-            CustomTextVectorizer::new(|text| Ok(embed_text(text))),
-        )
-        .expect("router should initialize"),
+    let pid = run_id();
+    let router = SemanticRouter::new(
+        format!("python_parity_router_{pid}_{id}"),
+        redis_url(),
+        routes(),
+        RoutingConfig {
+            max_k: 2,
+            aggregation_method: DistanceAggregationMethod::Avg,
+        },
+        CustomTextVectorizer::new(|text| Ok(embed_text(text))),
     )
+    .expect("router should initialize");
+    // Allow a brief settling period for the search index to process loaded
+    // documents so that queries issued immediately after creation can find
+    // all references.
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    Some(router)
 }
 
 #[test]
@@ -412,7 +422,8 @@ fn python_test_router_from_existing() {
     }
 
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let name = format!("python_parity_from_existing_{id}");
+    let pid = run_id();
+    let name = format!("python_parity_from_existing_{pid}_{id}");
     let router = SemanticRouter::new(
         name.clone(),
         redis_url(),
@@ -531,12 +542,16 @@ fn python_test_routes_different_distance_thresholds_get_two() {
     }
 
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = run_id();
     let mut test_routes = routes();
-    test_routes[0].distance_threshold = Some(0.5);
-    test_routes[1].distance_threshold = Some(0.7);
+    // The embed_text helper produces orthogonal vectors for greeting ([1,0,0])
+    // and farewell ([0,1,0]), yielding a cosine distance of 1.0 between them.
+    // Both thresholds must exceed 1.0 for both routes to match a single query.
+    test_routes[0].distance_threshold = Some(1.1);
+    test_routes[1].distance_threshold = Some(1.1);
 
     let router = SemanticRouter::new_with_options(
-        format!("python_parity_thresh_two_{id}"),
+        format!("python_parity_thresh_two_{pid}_{id}"),
         redis_url(),
         test_routes,
         RoutingConfig {
@@ -548,6 +563,7 @@ fn python_test_routes_different_distance_thresholds_get_two() {
         true,
     )
     .expect("router should initialize");
+    std::thread::sleep(std::time::Duration::from_millis(100));
 
     let matches = router
         .route_many(Some("hello"), None, Some(2), None)
@@ -572,12 +588,13 @@ fn python_test_routes_different_distance_thresholds_get_one() {
     }
 
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = run_id();
     let mut test_routes = routes();
     test_routes[0].distance_threshold = Some(0.5); // greeting: generous
     test_routes[1].distance_threshold = Some(0.3); // farewell: tight, won't match "hello"
 
     let router = SemanticRouter::new_with_options(
-        format!("python_parity_thresh_one_{id}"),
+        format!("python_parity_thresh_one_{pid}_{id}"),
         redis_url(),
         test_routes,
         RoutingConfig {
@@ -589,6 +606,7 @@ fn python_test_routes_different_distance_thresholds_get_one() {
         true,
     )
     .expect("router should initialize");
+    std::thread::sleep(std::time::Duration::from_millis(100));
 
     let matches = router
         .route_many(Some("hello"), None, Some(2), None)
@@ -611,7 +629,8 @@ fn python_test_router_persist_after_add_references() {
     }
 
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let name = format!("python_parity_persist_refs_{id}");
+    let pid = run_id();
+    let name = format!("python_parity_persist_refs_{pid}_{id}");
     let mut router = SemanticRouter::new(
         name.clone(),
         redis_url(),
@@ -653,7 +672,11 @@ fn python_test_bad_dtype_connecting_to_existing_router() {
         return;
     }
 
-    let name = format!("test_bad_dtype_{}", COUNTER.fetch_add(1, Ordering::Relaxed));
+    let name = format!(
+        "test_bad_dtype_{}_{}",
+        run_id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
 
     // Create a router with float32 dtype.
     let _router = SemanticRouter::new_with_options(
@@ -701,7 +724,8 @@ fn python_test_same_dtype_reconnect_succeeds() {
     }
 
     let name = format!(
-        "test_same_dtype_{}",
+        "test_same_dtype_{}_{}",
+        run_id(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
     );
 

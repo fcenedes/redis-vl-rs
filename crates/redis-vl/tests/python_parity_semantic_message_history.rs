@@ -8,6 +8,12 @@ use serde_json::json;
 
 static COUNTER: AtomicU64 = AtomicU64::new(1);
 
+/// Per-process unique run identifier to prevent stale-data collisions across
+/// parallel test runs sharing the same Redis instance.
+fn run_id() -> u32 {
+    std::process::id()
+}
+
 /// The dimensionality used by the deterministic test vectorizer.
 const VECTOR_DIMENSIONS: usize = 3;
 
@@ -22,25 +28,31 @@ fn redis_url() -> String {
 }
 
 fn embed_text(text: &str) -> Vec<f32> {
+    // Vector assignments are chosen so that:
+    //   - winter-sports cluster lives on the z-axis, well separated from
+    //     the fruit/vegetable cluster on the x-y plane;
+    //   - at cosine distance threshold 0.3 only the exact-topic messages match;
+    //   - at cosine distance threshold 0.5 the broader food cluster (5 msgs)
+    //     matches but the winter-sports cluster (3 msgs) does not, and vice versa.
     let lower = text.to_ascii_lowercase();
     if lower.contains("winter sports in the olympics") {
-        vec![0.0, 1.0, 0.0]
+        vec![0.0, 0.0, 1.0]
     } else if lower.contains("skiing, skating, luge") {
-        vec![0.0, 0.995, 0.1]
+        vec![0.0, 0.1, 0.995]
     } else if lower.contains("downhill skiing") || lower.contains("ice skating") {
-        vec![0.0, 0.94, 0.34]
+        vec![0.0, 0.34, 0.94]
     } else if lower.contains("winter sports") || lower.contains("skiing") || lower.contains("luge")
     {
-        vec![0.0, 1.0, 0.0]
+        vec![0.0, 0.0, 1.0]
     } else if lower.contains("fruits and vegetables") {
-        vec![0.65, 0.76, 0.0]
+        vec![0.55, 0.84, 0.0]
     } else if lower.contains("vegetable")
         || lower.contains("carrots")
         || lower.contains("broccoli")
         || lower.contains("onions")
         || lower.contains("spinach")
     {
-        vec![0.6, 0.8, 0.0]
+        vec![0.5, 0.87, 0.0]
     } else if lower.contains("fruit")
         || lower.contains("apple")
         || lower.contains("orange")
@@ -49,11 +61,11 @@ fn embed_text(text: &str) -> Vec<f32> {
     {
         vec![1.0, 0.0, 0.0]
     } else if lower.contains("cars") || lower.contains("vehicles") {
-        vec![0.0, 0.0, 1.0]
+        vec![0.0, 1.0, 0.0]
     } else if lower.contains("configuration") {
-        vec![0.2, 0.2, 0.96]
+        vec![0.2, 0.96, 0.2]
     } else {
-        vec![0.3, 0.3, 0.4]
+        vec![0.58, 0.58, 0.58]
     }
 }
 
@@ -63,9 +75,10 @@ fn create_history() -> Option<SemanticMessageHistory> {
     }
 
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = run_id();
     Some(
         SemanticMessageHistory::new(
-            format!("python_parity_semantic_history_{id}"),
+            format!("python_parity_semantic_history_{pid}_{id}"),
             redis_url(),
             0.3,
             3,
@@ -313,7 +326,8 @@ fn python_test_semantic_history_overwrite() {
     }
 
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let name = format!("python_parity_semhist_overwrite_{id}");
+    let pid = run_id();
+    let name = format!("python_parity_semhist_overwrite_{pid}_{id}");
     let url = redis_url();
 
     let history = SemanticMessageHistory::new_with_options(
@@ -360,7 +374,8 @@ fn python_test_bad_dtype_connecting_to_existing_semantic_history() {
     }
 
     let name = format!(
-        "test_bad_dtype_smh_{}",
+        "test_bad_dtype_smh_{}_{}",
+        run_id(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
     );
 
@@ -408,7 +423,8 @@ fn python_test_same_dtype_reconnect_semantic_history_succeeds() {
     }
 
     let name = format!(
-        "test_same_dtype_smh_{}",
+        "test_same_dtype_smh_{}_{}",
+        run_id(),
         COUNTER.fetch_add(1, Ordering::Relaxed)
     );
 

@@ -14,6 +14,12 @@ use serde_json::{Map, Value, json};
 
 static COUNTER: AtomicU64 = AtomicU64::new(1);
 
+/// Per-process unique run identifier to prevent stale-data collisions across
+/// parallel test runs sharing the same Redis instance.
+fn run_id() -> u32 {
+    std::process::id()
+}
+
 fn integration_enabled() -> bool {
     std::env::var("REDISVL_RUN_INTEGRATION")
         .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE"))
@@ -32,7 +38,8 @@ fn setup_multi_prefix_index() -> Option<(SearchIndex, String)> {
     }
 
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let unique = format!("mp{id}");
+    let pid = run_id();
+    let unique = format!("mp{pid}_{id}");
 
     let schema = json!({
         "index": {
@@ -305,7 +312,8 @@ fn multi_prefix_create_index_with_prefix_list() {
     }
 
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let unique = format!("cmp{id}");
+    let pid = run_id();
+    let unique = format!("cmp{pid}_{id}");
 
     let schema = json!({
         "index": {
@@ -371,7 +379,8 @@ fn multi_prefix_from_existing_preserves_prefixes() {
     }
 
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let unique = format!("fe{id}");
+    let pid = run_id();
+    let unique = format!("fe{pid}_{id}");
     let index_name = format!("from_existing_mp_{unique}");
 
     let schema = json!({

@@ -23,6 +23,12 @@ use serde_json::{Value, json};
 
 static COUNTER: AtomicU64 = AtomicU64::new(1);
 
+/// Per-process unique run identifier to prevent stale-data collisions across
+/// parallel test runs sharing the same Redis instance.
+fn run_id() -> u32 {
+    std::process::id()
+}
+
 fn integration_enabled() -> bool {
     std::env::var("REDISVL_RUN_INTEGRATION")
         .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE"))
@@ -66,10 +72,11 @@ fn redis84_available() -> bool {
 /// image_embedding (5-dim f32), and audio_embedding (6-dim f64).
 fn multi_vector_schema() -> Value {
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = run_id();
     json!({
         "index": {
-            "name": format!("hybrid_parity_index_{id}"),
-            "prefix": format!("hybrid_parity_prefix_{id}"),
+            "name": format!("hybrid_parity_index_{pid}_{id}"),
+            "prefix": format!("hybrid_parity_prefix_{pid}_{id}"),
             "storage_type": "hash",
         },
         "fields": [

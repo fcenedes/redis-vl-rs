@@ -9,6 +9,12 @@ use redis_vl::{
 
 static COUNTER: AtomicU64 = AtomicU64::new(1);
 
+/// Per-process unique run identifier to prevent stale-data collisions across
+/// parallel test runs sharing the same Redis instance.
+fn run_id() -> u32 {
+    std::process::id()
+}
+
 fn integration_enabled() -> bool {
     std::env::var("REDISVL_RUN_INTEGRATION")
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
@@ -36,8 +42,9 @@ fn create_history() -> Option<MessageHistory> {
     }
 
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = run_id();
     Some(MessageHistory::new(
-        format!("python_parity_role_history_{id}"),
+        format!("python_parity_role_history_{pid}_{id}"),
         redis_url(),
     ))
 }
@@ -48,9 +55,10 @@ fn create_semantic_history() -> Option<SemanticMessageHistory> {
     }
 
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = run_id();
     Some(
         SemanticMessageHistory::new(
-            format!("python_parity_role_semantic_history_{id}"),
+            format!("python_parity_role_semantic_history_{pid}_{id}"),
             redis_url(),
             0.4,
             3,

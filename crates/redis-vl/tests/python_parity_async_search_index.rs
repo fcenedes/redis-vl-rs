@@ -8,6 +8,12 @@ use serde_json::{Value, json};
 
 static COUNTER: AtomicU64 = AtomicU64::new(1);
 
+/// Per-process unique run identifier to prevent stale-data collisions across
+/// parallel test runs sharing the same Redis instance.
+fn run_id() -> u32 {
+    std::process::id()
+}
+
 fn integration_enabled() -> bool {
     std::env::var("REDISVL_RUN_INTEGRATION")
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
@@ -20,10 +26,11 @@ fn redis_url() -> String {
 
 fn unique_schema(storage_type: &str) -> Value {
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = run_id();
     json!({
         "index": {
-            "name": format!("python_parity_async_index_{storage_type}_{id}"),
-            "prefix": format!("python_parity_async_prefix_{storage_type}_{id}"),
+            "name": format!("python_parity_async_index_{storage_type}_{pid}_{id}"),
+            "prefix": format!("python_parity_async_prefix_{storage_type}_{pid}_{id}"),
             "storage_type": storage_type,
         },
         "fields": [
@@ -52,10 +59,11 @@ async fn create_query_index() -> Option<AsyncSearchIndex> {
     }
 
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = run_id();
     let schema = json!({
         "index": {
-            "name": format!("python_parity_async_query_index_{id}"),
-            "prefix": format!("python_parity_async_query_prefix_{id}"),
+            "name": format!("python_parity_async_query_index_{pid}_{id}"),
+            "prefix": format!("python_parity_async_query_prefix_{pid}_{id}"),
             "storage_type": "hash",
         },
         "fields": [
