@@ -871,7 +871,7 @@ impl std::fmt::Debug for SemanticMessageHistory {
 }
 
 fn current_timestamp() -> f64 {
-    Utc::now().timestamp_millis() as f64 / 1000.0
+    Utc::now().timestamp_micros() as f64 / 1_000_000.0
 }
 
 fn validate_top_k(top_k: usize) -> Result<()> {

@@ -12,6 +12,12 @@ use serde_json::{Map, json};
 
 static COUNTER: AtomicU64 = AtomicU64::new(1);
 
+/// Per-process unique run identifier to prevent stale-data collisions across
+/// parallel test runs sharing the same Redis instance.
+fn run_id() -> u32 {
+    std::process::id()
+}
+
 fn integration_enabled() -> bool {
     std::env::var("REDISVL_RUN_INTEGRATION")
         .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE"))
@@ -30,8 +36,15 @@ fn embed_text(text: &str) -> Vec<f32> {
         "This is another metadata prompt." => vec![0.0, 1.0, 0.0],
         "some random sentence" => vec![0.0, 0.0, 1.0],
         other => {
-            let score = (other.len() % 10) as f32 / 10.0;
-            vec![score, 1.0 - score, 0.0]
+            // Use a simple hash-based approach to produce unique vectors for
+            // different texts, even when they have the same length.
+            let hash = other
+                .bytes()
+                .fold(0u32, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u32));
+            let a = ((hash % 1000) as f32) / 1000.0;
+            let b = (((hash / 1000) % 1000) as f32) / 1000.0;
+            let c = 1.0 - a.max(b);
+            vec![a, b, c]
         }
     }
 }
@@ -42,7 +55,8 @@ fn build_cache(ttl_seconds: Option<u64>) -> Option<SemanticCache> {
     }
 
     let id = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let mut config = CacheConfig::new(format!("python_parity_semcache_{id}"), redis_url());
+    let pid = run_id();
+    let mut config = CacheConfig::new(format!("python_parity_semcache_{pid}_{id}"), redis_url());
     if let Some(ttl_seconds) = ttl_seconds {
         config = config.with_ttl(ttl_seconds);
     }
@@ -272,6 +286,9 @@ async fn python_test_async_semantic_cache_store_and_check() {
         )
         .await
         .expect("astore should succeed");
+
+    // Brief pause to let Redis index the newly stored document before querying.
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
     let hits = cache
         .acheck(
@@ -617,8 +634,9 @@ fn python_test_cache_with_filters() {
         return;
     }
 
-    let id = std::sync::atomic::AtomicU64::new(100).fetch_add(1, Ordering::Relaxed);
-    let config = CacheConfig::new(format!("parity_filter_cache_{id}"), redis_url());
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let pid = run_id();
+    let config = CacheConfig::new(format!("parity_filter_cache_{pid}_{id}"), redis_url());
     let cache = SemanticCache::with_filterable_fields(
         config,
         0.2,
