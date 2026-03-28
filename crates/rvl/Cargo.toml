@@ -15,6 +15,7 @@ categories = ["command-line-utilities", "database"]
 
 [dependencies]
 anstream.workspace = true
+anyhow = "1.0.102"
 clap.workspace = true
 comfy-table.workspace = true
 redis-vl = { path = "../redis-vl" }

@@ -2841,6 +2841,7 @@ name = "rvl"
 version = "0.1.0"
 dependencies = [
  "anstream",
+ "anyhow",
  "clap",
  "comfy-table",
  "redis-vl",
