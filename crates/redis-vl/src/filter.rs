@@ -1,4 +1,24 @@
 //! Filter expression DSL for Redis Search.
+//!
+//! Build composable filter expressions using the [`Tag`], [`Text`], [`Num`],
+//! [`Geo`], [`GeoRadius`], and [`Timestamp`] builders. Filters compile to
+//! Redis Search query syntax and can be attached to any query type.
+//!
+//! # Boolean composition
+//!
+//! Filters compose using Rust operators:
+//! - `&` – AND
+//! - `|` – OR
+//! - `!` – NOT
+//!
+//! # Example
+//!
+//! ```
+//! use redis_vl::filter::{Tag, Num};
+//!
+//! let filter = Tag::new("color").eq("red") & Num::new("price").lt(100.0);
+//! // Renders to: (@color:{red} @price:[-inf (100])
+//! ```
 
 use std::{
     fmt::{self, Display, Formatter},

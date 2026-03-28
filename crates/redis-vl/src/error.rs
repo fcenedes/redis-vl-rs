@@ -1,4 +1,8 @@
 //! Error types for `redis-vl`.
+//!
+//! All fallible public APIs return `Result<T, Error>`. The [`Error`] enum
+//! wraps underlying Redis, JSON, YAML, HTTP, I/O errors as well as
+//! domain-specific schema validation and input errors.
 
 /// Result alias used throughout the crate.
 pub type Result<T> = std::result::Result<T, Error>;

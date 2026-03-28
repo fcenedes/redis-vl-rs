@@ -1,26 +1,21 @@
 # Benchmarks
 
-[Criterion](https://bheisler.github.io/criterion.rs/book/) benchmarks for the
-`redis-vl` library. Benchmarks are defined in `crates/redis-vl/benches/`.
+`redis-vl` includes [Criterion](https://bheisler.github.io/criterion.rs/book/)
+micro-benchmarks that measure the performance of core operations.
 
-## Running
+## Running benchmarks
 
 ```bash
 # Pure-Rust benchmarks (no Redis required)
 cargo bench -p redis-vl
 
-# Include Redis-backed benchmarks (requires running Redis 8+ or Redis Stack)
+# Include Redis-backed benchmarks (requires running Redis instance)
 REDISVL_RUN_INTEGRATION=1 cargo bench -p redis-vl
 ```
 
-## Benchmark files
+## Benchmark inventory
 
-| File | Description |
-| --- | --- |
-| `core_benchmarks.rs` | Pure-Rust benchmarks (always runnable) |
-| `redis_benchmarks.rs` | Redis-backed benchmarks (environment-gated) |
-
-## Pure-Rust benchmarks (`core_benchmarks`)
+### Pure-Rust benchmarks (`core_benchmarks`)
 
 | Benchmark | What it measures |
 | --- | --- |
@@ -28,13 +23,13 @@ REDISVL_RUN_INTEGRATION=1 cargo bench -p redis-vl
 | Filter rendering | Filter expression compilation to Redis query syntax |
 | Query building | Query construction and parameter compilation |
 
-## Redis-backed benchmarks (`redis_benchmarks`)
+### Redis-backed benchmarks (`redis_benchmarks`)
 
-Require `REDISVL_RUN_INTEGRATION=1` and a running Redis instance.
+These require `REDISVL_RUN_INTEGRATION=1` and a running Redis instance.
 
 | Benchmark | What it measures |
 | --- | --- |
-| Index create/exists/info | Index lifecycle round-trip latency |
+| Index create/exists/info | Index lifecycle operations |
 | Index load/fetch | Document loading and retrieval |
 | Vector search | Vector similarity search latency |
 | Filter search | Filter-only query latency |
@@ -46,15 +41,29 @@ Require `REDISVL_RUN_INTEGRATION=1` and a running Redis instance.
 | Message history | History add/get_recent operations |
 | Semantic message history | Semantic history add/get_relevant operations |
 
-## Viewing results
+## Interpreting results
 
-Criterion generates HTML reports in `target/criterion/`:
+Criterion generates HTML reports in `target/criterion/`. Open the report index
+to see statistical analysis, regression detection, and comparison plots:
 
 ```bash
 open target/criterion/report/index.html
 ```
 
-## Python comparison
+## Adding new benchmarks
+
+Benchmarks live in `crates/redis-vl/benches/`:
+
+- `core_benchmarks.rs` – pure-Rust benchmarks (always runnable)
+- `redis_benchmarks.rs` – Redis-backed benchmarks (environment-gated)
+
+To add a new benchmark:
+
+1. Add a benchmark function to the appropriate file
+2. Register it in the criterion group
+3. Run `cargo bench -p redis-vl` to verify
+
+## Future: Rust vs Python comparison
 
 A Rust-vs-Python comparison harness is planned but not yet implemented. The
 goal is to measure relative performance for schema parsing, query compilation,

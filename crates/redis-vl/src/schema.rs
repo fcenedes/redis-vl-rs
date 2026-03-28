@@ -1,4 +1,25 @@
 //! Index schema types and Redis Search serialization helpers.
+//!
+//! An [`IndexSchema`] describes the structure of a Redis Search index including
+//! its name, key prefix(es), storage type (Hash or JSON), stopwords, and a
+//! list of typed field definitions. Schemas can be loaded from YAML files,
+//! YAML strings, or JSON values.
+//!
+//! # Example
+//!
+//! ```
+//! use redis_vl::IndexSchema;
+//!
+//! let schema = IndexSchema::from_yaml_str(r#"
+//! index:
+//!   name: my-index
+//!   prefix: doc
+//! fields:
+//!   - name: title
+//!     type: tag
+//! "#).unwrap();
+//! assert_eq!(schema.index.name, "my-index");
+//! ```
 
 use std::{collections::HashSet, fs, path::Path};
 

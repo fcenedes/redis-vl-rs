@@ -1,4 +1,12 @@
 //! Semantic and embedding cache extensions.
+//!
+//! [`EmbeddingsCache`] provides deterministic cache lookups for embedding
+//! vectors keyed by content and model name. [`SemanticCache`] provides LLM
+//! response caching with vector similarity lookup — when a new prompt is
+//! semantically similar to a cached prompt (within a configurable distance
+//! threshold), the cached response is returned.
+//!
+//! Both caches are Redis-backed and support sync and async operations.
 
 use std::{collections::HashMap, sync::Arc};
 

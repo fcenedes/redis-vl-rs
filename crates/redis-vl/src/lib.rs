@@ -34,8 +34,8 @@
 //! - `cohere` – Cohere vectorizer and reranker support
 //! - `voyageai` – VoyageAI vectorizer
 //! - `mistral` – Mistral vectorizer
-//! - `sql` – SQL query support ([`SQLQuery`])
-//! - `rerankers` – Reranker support ([`CohereReranker`])
+//! - `sql` – SQL query support (`SQLQuery`)
+//! - `rerankers` – Reranker support (`CohereReranker`)
 
 /// Error types returned by the library.
 ///
@@ -74,14 +74,14 @@ pub mod index;
 /// [`CountQuery`](query::CountQuery), [`HybridQuery`](query::HybridQuery),
 /// [`AggregateHybridQuery`](query::AggregateHybridQuery),
 /// [`MultiVectorQuery`](query::MultiVectorQuery), and (with `sql` feature)
-/// [`SQLQuery`](query::SQLQuery).
+/// `SQLQuery`.
 pub mod query;
 
 /// Reranker abstractions and provider adapters.
 ///
 /// The [`Reranker`](rerankers::Reranker) and [`AsyncReranker`](rerankers::AsyncReranker)
 /// traits define the reranking interface. Enable the `rerankers` feature for
-/// [`CohereReranker`](rerankers::CohereReranker).
+/// `CohereReranker`.
 pub mod rerankers;
 
 /// Schema types and Redis Search schema serialization.
@@ -111,8 +111,8 @@ pub use index::{
     AsyncSearchIndex, QueryOutput, RedisConnectionInfo, SearchDocument, SearchIndex, SearchResult,
 };
 pub use query::{
-    AggregateHybridQuery, CountQuery, FilterQuery, HybridCombinationMethod, HybridPolicy,
-    HybridQuery, MultiVectorQuery, PageableQuery, QueryKind, QueryLimit, QueryParam,
+    AggregateHybridQuery, CountQuery, FilterQuery, GeoFilter, HybridCombinationMethod,
+    HybridPolicy, HybridQuery, MultiVectorQuery, PageableQuery, QueryKind, QueryLimit, QueryParam,
     QueryParamValue, QueryRender, QueryString, SearchHistoryMode, SortBy, SortDirection, TextQuery,
     Vector, VectorDtype, VectorInput, VectorQuery, VectorRangeQuery, VectorSearchMethod,
 };
