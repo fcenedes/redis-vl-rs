@@ -61,11 +61,9 @@ Python (redisvl) and generates a side-by-side Markdown report.
 
 ### Prerequisites
 
-- Python 3.10+ with redisvl installed:
-
-```bash
-pip install -r benches/python/requirements.txt
-```
+- [`uv`](https://docs.astral.sh/uv/) — the script creates an isolated
+  virtualenv automatically via `uv`, installs benchmark-only Python
+  dependencies, and removes the virtualenv when done.
 
 ### Running
 
@@ -78,6 +76,9 @@ benches/compare.sh --redis
 
 # With progress output
 benches/compare.sh --verbose
+
+# Keep the uv virtualenv after the run (useful for debugging)
+benches/compare.sh --keep-env
 ```
 
 ### Environment Variables
@@ -85,7 +86,6 @@ benches/compare.sh --verbose
 | Variable | Default | Description |
 | --- | --- | --- |
 | `REDIS_URL` | `redis://127.0.0.1:6379` | Redis connection URL |
-| `PYTHON` | `python3` | Python interpreter path |
 | `CARGO_BENCH_ARGS` | *(empty)* | Extra flags passed to `cargo bench` |
 
 ### Output

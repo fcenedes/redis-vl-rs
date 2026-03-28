@@ -5,16 +5,19 @@
 #   benches/compare.sh              # core (pure-computation) benchmarks only
 #   benches/compare.sh --redis      # include Redis-backed benchmarks
 #   benches/compare.sh --verbose    # show progress on stderr
+#   benches/compare.sh --keep-env   # keep the uv virtualenv after the run
+#
+# The script creates an isolated virtualenv via `uv` under
+# target/bench-compare/.venv, installs benchmark-only Python dependencies,
+# and removes the virtualenv when done (unless --keep-env is passed).
 #
 # Environment:
 #   REDIS_URL          Redis connection URL (default: redis://127.0.0.1:6379)
-#   PYTHON             Python interpreter   (default: python3)
 #   CARGO_BENCH_ARGS   Extra args for cargo bench (e.g. --features sql)
 #
 # Prerequisites:
 #   - Rust toolchain (cargo, criterion)
-#   - Python 3.10+ with redisvl installed:
-#       pip install -r benches/python/requirements.txt
+#   - uv (https://docs.astral.sh/uv/)
 #   - For --redis: a running Redis 8+ / Redis Stack instance
 #
 # Output:
@@ -26,20 +29,37 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 OUT_DIR="$ROOT_DIR/target/bench-compare"
-PYTHON="${PYTHON:-python3}"
 REDIS_URL="${REDIS_URL:-redis://127.0.0.1:6379}"
 VERBOSE=""
 RUN_REDIS=""
+KEEP_ENV=""
 
 for arg in "$@"; do
     case "$arg" in
-        --redis)   RUN_REDIS=1 ;;
-        --verbose) VERBOSE="--verbose" ;;
-        *)         echo "Unknown arg: $arg" >&2; exit 1 ;;
+        --redis)    RUN_REDIS=1 ;;
+        --verbose)  VERBOSE="--verbose" ;;
+        --keep-env) KEEP_ENV=1 ;;
+        *)          echo "Unknown arg: $arg" >&2; exit 1 ;;
     esac
 done
 
 mkdir -p "$OUT_DIR"
+
+# -------------------------------------------------------------------------
+# 0. Create isolated uv virtualenv with benchmark dependencies
+# -------------------------------------------------------------------------
+VENV_DIR="$OUT_DIR/.venv"
+
+echo ">>> Setting up Python virtualenv via uv …" >&2
+uv venv "$VENV_DIR" --quiet 2>&1 >&2
+uv pip install --quiet -r "$SCRIPT_DIR/python/requirements.txt" -p "$VENV_DIR/bin/python" 2>&1 >&2
+
+PYTHON="$VENV_DIR/bin/python"
+
+# Clean up the virtualenv on exit unless --keep-env was passed
+if [[ -z "$KEEP_ENV" ]]; then
+    trap 'rm -rf "$VENV_DIR"' EXIT
+fi
 
 # -------------------------------------------------------------------------
 # 1. Run Rust Criterion benchmarks (core)

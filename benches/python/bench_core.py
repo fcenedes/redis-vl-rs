@@ -64,7 +64,9 @@ def bench_schema_from_json():
 
 def bench_schema_to_yaml():
     schema = IndexSchema.from_dict(SCHEMA_DICT)
-    yaml.dump(schema.model_dump(), Dumper=yaml.SafeDumper)
+    # mode="json" ensures enum values (e.g. FieldTypes.TEXT) are serialized as
+    # plain strings so PyYAML's SafeDumper can handle them.
+    yaml.dump(schema.model_dump(mode="json"), Dumper=yaml.SafeDumper)
 
 
 # ---------------------------------------------------------------------------
@@ -82,7 +84,7 @@ def bench_filter_compound():
 
 
 def bench_filter_negated():
-    f = ~((Tag("status") == "deleted") | (Tag("status") == "archived"))
+    f = (Tag("status") != "deleted") & (Tag("status") != "archived")
     str(f)
 
 
