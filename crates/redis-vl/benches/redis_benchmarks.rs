@@ -26,6 +26,13 @@ use serde_json::{Value, json};
 
 static BENCH_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
+/// Maximum iterations per benchmark sample to avoid exhausting macOS
+/// ephemeral ports.  Each iteration opens 1-3 TCP connections that linger
+/// in TIME_WAIT (~30 s on macOS with default MSL), so we cap total
+/// connections per benchmark function to stay well under the ~16 k port
+/// limit.
+const MAX_ITERS: u64 = 10;
+
 fn redis_url() -> String {
     std::env::var("REDIS_URL").unwrap_or_else(|_| "redis://127.0.0.1:6379".to_string())
 }
@@ -34,6 +41,27 @@ fn benchmarks_enabled() -> bool {
     std::env::var("REDISVL_RUN_BENCHMARKS")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
+}
+
+/// Run a benchmark operation with a capped iteration count, extrapolating
+/// timing so Criterion computes valid per-iteration estimates.
+fn capped_iter_custom<F>(b: &mut criterion::Bencher, mut op: F)
+where
+    F: FnMut(),
+{
+    b.iter_custom(|iters| {
+        let actual = iters.min(MAX_ITERS);
+        let start = std::time::Instant::now();
+        for _ in 0..actual {
+            op();
+        }
+        let elapsed = start.elapsed();
+        if actual > 0 && actual < iters {
+            elapsed.mul_f64(iters as f64 / actual as f64)
+        } else {
+            elapsed
+        }
+    });
 }
 
 fn unique_name(prefix: &str) -> String {
@@ -71,20 +99,30 @@ fn bench_index_create(c: &mut Criterion) {
         return;
     }
 
+    // Use iter_custom to cap iterations — each create+delete cycle opens
+    // multiple TCP connections that linger in TIME_WAIT on macOS.  We cap
+    // at MAX_ITERS and extrapolate timing so Criterion gets valid estimates.
     c.bench_function("index_create", |b| {
-        b.iter_batched(
-            || {
+        b.iter_custom(|iters| {
+            let actual = iters.min(MAX_ITERS);
+            let mut total = std::time::Duration::ZERO;
+            for _ in 0..actual {
                 let mut schema = IndexSchema::from_yaml_str(BASIC_SCHEMA_YAML).unwrap();
                 schema.index.name = unique_name("idx_create");
-                SearchIndex::new(schema, redis_url())
-            },
-            |index| {
+                let index = SearchIndex::new(schema, redis_url());
+                let start = std::time::Instant::now();
                 index.create().unwrap();
-                // Cleanup
+                total += start.elapsed();
                 let _ = index.delete(true);
-            },
-            criterion::BatchSize::PerIteration,
-        );
+            }
+            // Extrapolate to the requested iteration count so Criterion
+            // calculates per-iteration time correctly.
+            if actual > 0 && actual < iters {
+                total.mul_f64(iters as f64 / actual as f64)
+            } else {
+                total
+            }
+        });
     });
 }
 
@@ -99,7 +137,7 @@ fn bench_index_exists(c: &mut Criterion) {
     index.create().unwrap();
 
     c.bench_function("index_exists", |b| {
-        b.iter(|| {
+        capped_iter_custom(b, || {
             black_box(index.exists().unwrap());
         });
     });
@@ -118,7 +156,7 @@ fn bench_index_info(c: &mut Criterion) {
     index.create().unwrap();
 
     c.bench_function("index_info", |b| {
-        b.iter(|| {
+        capped_iter_custom(b, || {
             black_box(index.info().unwrap());
         });
     });
@@ -149,7 +187,7 @@ fn bench_index_load_single(c: &mut Criterion) {
     });
 
     c.bench_function("index_load_single", |b| {
-        b.iter(|| {
+        capped_iter_custom(b, || {
             index.load(&[black_box(doc.clone())], "id", None).unwrap();
         });
     });
@@ -183,7 +221,7 @@ fn bench_index_load_batch(c: &mut Criterion) {
 
         group.throughput(Throughput::Elements(*size as u64));
         group.bench_with_input(BenchmarkId::from_parameter(size), &docs, |b, docs| {
-            b.iter(|| {
+            capped_iter_custom(b, || {
                 index.clear().unwrap();
                 index.load(black_box(docs), "id", None).unwrap();
             });
@@ -204,7 +242,8 @@ fn bench_index_fetch(c: &mut Criterion) {
     let index = SearchIndex::new(schema, redis_url());
     index.create().unwrap();
 
-    // Load test data
+    // Load test data — use string-only fields (no raw binary vectors) because
+    // hash-storage fetch decodes values as UTF-8 strings.
     let docs: Vec<Value> = (0..100)
         .map(|i| {
             json!({
@@ -212,23 +251,22 @@ fn bench_index_fetch(c: &mut Criterion) {
                 "title": format!("title-{i}"),
                 "content": "benchmark document",
                 "score": i,
-                "embedding": vec![0.1_f32; 128]
             })
         })
         .collect();
     index.load(&docs, "id", None).unwrap();
 
     c.bench_function("index_fetch_single", |b| {
-        b.iter(|| {
-            index.fetch("doc:50").unwrap();
+        capped_iter_custom(b, || {
+            black_box(index.fetch("doc:50").unwrap());
         });
     });
 
     c.bench_function("index_fetch_batch", |b| {
         let ids: Vec<&str> = (0..20).map(|i| docs[i]["id"].as_str().unwrap()).collect();
-        b.iter(|| {
+        capped_iter_custom(b, || {
             for id in black_box(&ids) {
-                let _ = index.fetch(id).unwrap();
+                black_box(index.fetch(id).unwrap());
             }
         });
     });
@@ -268,7 +306,7 @@ fn bench_search_vector_small(c: &mut Criterion) {
     let query = VectorQuery::new(Vector::new(&query_vec), "embedding", 10);
 
     c.bench_function("search_vector_k10_n100", |b| {
-        b.iter(|| {
+        capped_iter_custom(b, || {
             black_box(index.search(&query).unwrap());
         });
     });
@@ -305,7 +343,7 @@ fn bench_search_vector_with_filter(c: &mut Criterion) {
     let query = VectorQuery::new(Vector::new(&query_vec), "embedding", 10).with_filter(filter);
 
     c.bench_function("search_vector_with_filter", |b| {
-        b.iter(|| {
+        capped_iter_custom(b, || {
             black_box(index.search(&query).unwrap());
         });
     });
@@ -344,7 +382,7 @@ fn bench_search_filter(c: &mut Criterion) {
     c.bench_function("search_filter_simple", |b| {
         let filter = Tag::new("title").eq("category-5");
         let query = FilterQuery::new(filter);
-        b.iter(|| {
+        capped_iter_custom(b, || {
             black_box(index.search(&query).unwrap());
         });
     });
@@ -353,7 +391,7 @@ fn bench_search_filter(c: &mut Criterion) {
         let filter = Tag::new("title").eq("category-5")
             & Num::new("score").between(100.0, 300.0, redis_vl::BetweenInclusivity::Both);
         let query = FilterQuery::new(filter);
-        b.iter(|| {
+        capped_iter_custom(b, || {
             black_box(index.search(&query).unwrap());
         });
     });
@@ -388,7 +426,7 @@ fn bench_search_count(c: &mut Criterion) {
     c.bench_function("search_count", |b| {
         let filter = Tag::new("title").eq("category-5");
         let query = CountQuery::new().with_filter(filter);
-        b.iter(|| {
+        capped_iter_custom(b, || {
             black_box(index.query(&query).unwrap());
         });
     });
@@ -438,7 +476,7 @@ fn bench_search_batch(c: &mut Criterion) {
             BenchmarkId::from_parameter(count),
             &queries,
             |b, queries| {
-                b.iter(|| {
+                capped_iter_custom(b, || {
                     black_box(index.batch_search(queries.iter()).unwrap());
                 });
             },
@@ -476,7 +514,7 @@ fn bench_search_paginate(c: &mut Criterion) {
     c.bench_function("search_paginate", |b| {
         let filter = Tag::new("title").eq("match");
         let query = FilterQuery::new(filter);
-        b.iter(|| {
+        capped_iter_custom(b, || {
             black_box(index.paginate(&query, 10).unwrap());
         });
     });
@@ -502,7 +540,7 @@ fn bench_embeddings_cache_set(c: &mut Criterion) {
 
     c.bench_function("embedcache_set", |b| {
         let embedding = vec![0.1_f32; 128];
-        b.iter(|| {
+        capped_iter_custom(b, || {
             cache
                 .set(
                     "test content",
@@ -544,7 +582,7 @@ fn bench_embeddings_cache_get_hit(c: &mut Criterion) {
         .unwrap();
 
     c.bench_function("embedcache_get_hit", |b| {
-        b.iter(|| {
+        capped_iter_custom(b, || {
             black_box(
                 cache
                     .get("cached content", "text-embedding-ada-002")
@@ -569,7 +607,7 @@ fn bench_embeddings_cache_get_miss(c: &mut Criterion) {
     let cache = EmbeddingsCache::new(config);
 
     c.bench_function("embedcache_get_miss", |b| {
-        b.iter(|| {
+        capped_iter_custom(b, || {
             black_box(
                 cache
                     .get("uncached content", "text-embedding-ada-002")
@@ -610,7 +648,7 @@ fn bench_semantic_cache_store(c: &mut Criterion) {
         }));
 
     c.bench_function("semcache_store", |b| {
-        b.iter(|| {
+        capped_iter_custom(b, || {
             cache
                 .store(
                     "what is the capital of France?",
@@ -656,7 +694,7 @@ fn bench_semantic_cache_check_hit(c: &mut Criterion) {
         .unwrap();
 
     c.bench_function("semcache_check_hit", |b| {
-        b.iter(|| {
+        capped_iter_custom(b, || {
             black_box(
                 cache
                     .check(
@@ -692,7 +730,7 @@ fn bench_semantic_cache_check_miss(c: &mut Criterion) {
         }));
 
     c.bench_function("semcache_check_miss", |b| {
-        b.iter(|| {
+        capped_iter_custom(b, || {
             black_box(
                 cache
                     .check(
@@ -723,7 +761,7 @@ fn bench_message_history_add(c: &mut Criterion) {
     let history = MessageHistory::new(unique_name("msghist"), redis_url());
 
     c.bench_function("msghist_add_single", |b| {
-        b.iter(|| {
+        capped_iter_custom(b, || {
             let msg = Message::new(MessageRole::User, "benchmark message");
             history.add_message(black_box(msg)).unwrap();
         });
@@ -747,7 +785,7 @@ fn bench_message_history_get_recent(c: &mut Criterion) {
     }
 
     c.bench_function("msghist_get_recent_10", |b| {
-        b.iter(|| {
+        capped_iter_custom(b, || {
             black_box(history.get_recent(10, None).unwrap());
         });
     });
@@ -774,7 +812,7 @@ fn bench_semantic_history_add(c: &mut Criterion) {
     .unwrap();
 
     c.bench_function("semhist_add_single", |b| {
-        b.iter(|| {
+        capped_iter_custom(b, || {
             let msg = Message::new(MessageRole::User, "benchmark message");
             history.add_message(black_box(msg)).unwrap();
         });
@@ -805,7 +843,7 @@ fn bench_semantic_history_get_recent(c: &mut Criterion) {
     }
 
     c.bench_function("semhist_get_recent_10", |b| {
-        b.iter(|| {
+        capped_iter_custom(b, || {
             black_box(history.get_recent(10, None).unwrap());
         });
     });
@@ -840,7 +878,7 @@ fn bench_semantic_history_get_relevant(c: &mut Criterion) {
     }
 
     c.bench_function("semhist_get_relevant", |b| {
-        b.iter(|| {
+        capped_iter_custom(b, || {
             black_box(
                 history
                     .get_relevant_with_options("technology query", 5, None, None, None, false)
@@ -852,60 +890,70 @@ fn bench_semantic_history_get_relevant(c: &mut Criterion) {
     history.delete().unwrap();
 }
 
-criterion_group!(
-    index_lifecycle,
-    bench_index_create,
-    bench_index_exists,
-    bench_index_info,
-);
+// Redis benchmarks use short measurement windows and small sample counts to
+// avoid exhausting macOS ephemeral ports (~16 k) — each iteration opens TCP
+// connections that linger in TIME_WAIT for ~60 s.
 
-criterion_group!(
-    index_data,
-    bench_index_load_single,
-    bench_index_load_batch,
-    bench_index_fetch,
-);
+fn redis_criterion() -> Criterion {
+    Criterion::default()
+        .sample_size(10)
+        .warm_up_time(std::time::Duration::from_millis(100))
+        .measurement_time(std::time::Duration::from_millis(500))
+}
 
-criterion_group!(
-    search_vector,
-    bench_search_vector_small,
-    bench_search_vector_with_filter,
-);
+criterion_group! {
+    name = index_lifecycle;
+    config = redis_criterion();
+    targets = bench_index_create, bench_index_exists, bench_index_info
+}
 
-criterion_group!(search_filter_count, bench_search_filter, bench_search_count,);
+criterion_group! {
+    name = index_data;
+    config = redis_criterion();
+    targets = bench_index_load_single, bench_index_load_batch, bench_index_fetch
+}
 
-criterion_group!(
-    search_batch_pagination,
-    bench_search_batch,
-    bench_search_paginate,
-);
+criterion_group! {
+    name = search_vector;
+    config = redis_criterion();
+    targets = bench_search_vector_small, bench_search_vector_with_filter
+}
 
-criterion_group!(
-    embeddings_cache,
-    bench_embeddings_cache_set,
-    bench_embeddings_cache_get_hit,
-    bench_embeddings_cache_get_miss,
-);
+criterion_group! {
+    name = search_filter_count;
+    config = redis_criterion();
+    targets = bench_search_filter, bench_search_count
+}
 
-criterion_group!(
-    semantic_cache,
-    bench_semantic_cache_store,
-    bench_semantic_cache_check_hit,
-    bench_semantic_cache_check_miss,
-);
+criterion_group! {
+    name = search_batch_pagination;
+    config = redis_criterion();
+    targets = bench_search_batch, bench_search_paginate
+}
 
-criterion_group!(
-    message_history,
-    bench_message_history_add,
-    bench_message_history_get_recent,
-);
+criterion_group! {
+    name = embeddings_cache;
+    config = redis_criterion();
+    targets = bench_embeddings_cache_set, bench_embeddings_cache_get_hit, bench_embeddings_cache_get_miss
+}
 
-criterion_group!(
-    semantic_history,
-    bench_semantic_history_add,
-    bench_semantic_history_get_recent,
-    bench_semantic_history_get_relevant,
-);
+criterion_group! {
+    name = semantic_cache;
+    config = redis_criterion();
+    targets = bench_semantic_cache_store, bench_semantic_cache_check_hit, bench_semantic_cache_check_miss
+}
+
+criterion_group! {
+    name = message_history;
+    config = redis_criterion();
+    targets = bench_message_history_add, bench_message_history_get_recent
+}
+
+criterion_group! {
+    name = semantic_history;
+    config = redis_criterion();
+    targets = bench_semantic_history_add, bench_semantic_history_get_recent, bench_semantic_history_get_relevant
+}
 
 criterion_main!(
     index_lifecycle,

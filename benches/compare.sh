@@ -58,7 +58,7 @@ PYTHON="$VENV_DIR/bin/python"
 
 # Clean up the virtualenv on exit unless --keep-env was passed
 if [[ -z "$KEEP_ENV" ]]; then
-    trap 'rm -rf "$VENV_DIR"' EXIT
+    trap 'rm -rf "$VENV_DIR" 2>/dev/null || true' EXIT
 fi
 
 # -------------------------------------------------------------------------
@@ -66,7 +66,7 @@ fi
 # -------------------------------------------------------------------------
 echo ">>> Running Rust core benchmarks …" >&2
 cargo bench -p redis-vl --bench core_benchmarks ${CARGO_BENCH_ARGS:-} \
-    -- --save-baseline rust-vs-python 2>&1 | tail -1 >&2 || true
+    -- --save-baseline rust-vs-python >&2
 
 # Parse Criterion estimates into JSON
 "$PYTHON" - "$ROOT_DIR" > "$OUT_DIR/rust_core.json" <<'PYEOF'
@@ -102,10 +102,39 @@ echo ">>> Running Python core benchmarks …" >&2
 # 3. Redis-backed benchmarks (optional)
 # -------------------------------------------------------------------------
 if [[ -n "$RUN_REDIS" ]]; then
+    # Wait for Redis to be ready (Docker may be slow to accept connections)
+    echo ">>> Checking Redis readiness at $REDIS_URL …" >&2
+    _redis_host="${REDIS_URL#redis://}"
+    _redis_host="${_redis_host%%/*}"
+    _redis_host_only="${_redis_host%%:*}"
+    _redis_port="${_redis_host##*:}"
+    _redis_port="${_redis_port:-6379}"
+    for _i in $(seq 1 30); do
+        if "$PYTHON" -c "
+import socket, sys
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.settimeout(2)
+try:
+    s.connect(('$_redis_host_only', $_redis_port))
+    s.sendall(b'PING\r\n')
+    data = s.recv(64)
+    s.close()
+    sys.exit(0 if b'PONG' in data else 1)
+except Exception:
+    s.close()
+    sys.exit(1)
+" 2>/dev/null; then
+            echo "  Redis is ready." >&2
+            break
+        fi
+        echo "  Waiting for Redis (attempt $_i/30)…" >&2
+        sleep 2
+    done
+
     echo ">>> Running Rust Redis benchmarks …" >&2
     REDISVL_RUN_BENCHMARKS=1 REDIS_URL="$REDIS_URL" \
         cargo bench -p redis-vl --bench redis_benchmarks ${CARGO_BENCH_ARGS:-} \
-            -- --save-baseline rust-vs-python 2>&1 | tail -1 >&2 || true
+            -- --save-baseline rust-vs-python >&2
 
     "$PYTHON" - "$ROOT_DIR" > "$OUT_DIR/rust_redis.json" <<'PYEOF'
 import json, sys, pathlib

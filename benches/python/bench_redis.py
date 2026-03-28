@@ -22,18 +22,41 @@ from __future__ import annotations
 import os
 import random
 import sys
+import time
 import uuid
 
 import numpy as np
+import redis as _redis_lib
 
 from bench_harness import BenchSuite
-from redisvl.extensions.llmcache import SemanticCache
+from redisvl.extensions.cache.llm import SemanticCache
 from redisvl.index import SearchIndex
 from redisvl.query import CountQuery, FilterQuery, VectorQuery
 from redisvl.query.filter import Num, Tag
 from redisvl.schema import IndexSchema
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://127.0.0.1:6379")
+
+
+def _wait_for_redis(url: str = REDIS_URL, retries: int = 15, delay: float = 2.0) -> None:
+    """Block until a Redis PING succeeds, retrying with back-off."""
+    for attempt in range(1, retries + 1):
+        try:
+            r = _redis_lib.from_url(url, socket_connect_timeout=5)
+            r.ping()
+            r.close()
+            return
+        except Exception as exc:
+            if attempt == retries:
+                raise RuntimeError(
+                    f"Redis at {url} not reachable after {retries} attempts: {exc}"
+                ) from exc
+            print(
+                f"  Redis not ready (attempt {attempt}/{retries}): {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            time.sleep(delay)
 
 
 def _uid(prefix: str) -> str:
@@ -98,7 +121,7 @@ def add_index_benchmarks(suite: BenchSuite) -> None:
         idx.create(overwrite=True)
         indices_to_cleanup.append(idx)
 
-    suite.add("index_create", bench_create, sample_iters=50,
+    suite.add("index_create", bench_create, warmup_iters=3, sample_iters=20,
               teardown=lambda: [i.delete() for i in indices_to_cleanup])
 
     idx_e = _make_index(_uid("idx_exists"))
@@ -174,9 +197,9 @@ def _simple_vectorizer(text: str) -> list[float]:
 
 
 def add_cache_benchmarks(suite: BenchSuite) -> None:
-    from redisvl.utils.vectorize import CustomTextVectorizer
+    from redisvl.utils.vectorize import CustomVectorizer
 
-    vectorizer = CustomTextVectorizer(embed=_simple_vectorizer)
+    vectorizer = CustomVectorizer(embed=_simple_vectorizer)
     cache = SemanticCache(
         name=_uid("semcache"),
         redis_url=REDIS_URL,
@@ -205,6 +228,12 @@ def add_cache_benchmarks(suite: BenchSuite) -> None:
 
 def main():
     verbose = "--verbose" in sys.argv
+
+    # Wait until Redis is actually accepting commands (Docker may be slow)
+    if verbose:
+        print("  Checking Redis readiness …", file=sys.stderr, flush=True)
+    _wait_for_redis()
+
     suite = BenchSuite("redis")
 
     add_index_benchmarks(suite)
