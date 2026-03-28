@@ -121,7 +121,24 @@ let query = SQLQuery::new("SELECT * FROM products WHERE category = 'electronics'
     .with_param("min", SqlParam::Float(99.99));
 ```
 
-Supported SQL features: `WHERE` (comparisons, `IN`/`NOT IN`, `LIKE`, `BETWEEN`,
-`AND`/`OR`), `ORDER BY`, `LIMIT`/`OFFSET`, and field projection. Aggregate
-queries (`COUNT`, `GROUP BY`) are not yet supported.
+Supported SQL features:
+
+- **Filtering**: `WHERE` with comparisons, `IN`/`NOT IN`, `LIKE`/`NOT LIKE`,
+  `BETWEEN`, `AND`/`OR`
+- **Ordering & pagination**: `ORDER BY`, `LIMIT`/`OFFSET`, field projection
+- **Aggregate functions**: `COUNT`, `SUM`, `AVG`, `MIN`, `MAX`, `STDDEV`,
+  `COUNT_DISTINCT`, `QUANTILE`, `GROUP BY` (translated to `FT.AGGREGATE`)
+- **Vector search**: `vector_distance(field, :param)` and
+  `cosine_distance(field, :param)` in SELECT (translated to KNN `FT.SEARCH`)
+- **Geo functions**: `geo_distance(field, POINT(lon, lat), 'unit') < radius`
+  in WHERE (→ `GEOFILTER`), and `geo_distance(field, POINT(lon, lat))` in
+  SELECT (→ `FT.AGGREGATE` with `APPLY geodistance`)
+
+`SearchIndex::sql_query()` and `AsyncSearchIndex::sql_query()` automatically
+dispatch to `FT.SEARCH` or `FT.AGGREGATE` based on the SQL statement.
+
+**Not yet supported:** date functions (`YEAR()`), `IS NULL`/`IS NOT NULL`,
+`HAVING`, phrase-level stopwords. The SQL parser uses a hand-rolled tokenizer
+rather than `sqlparser-rs`, which is the recommended approach for Redis-specific
+translation control.
 

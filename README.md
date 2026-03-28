@@ -23,11 +23,15 @@ of [Redis](https://redis.io/).
   `AggregateHybridQuery` (`FT.AGGREGATE`), and `MultiVectorQuery`.
 - **SQL Queries** – `SQLQuery` behind the `sql` feature flag: translates SQL
   `SELECT` statements to Redis Search queries with `WHERE`, `ORDER BY`,
-  `LIMIT`/`OFFSET`, field projection, and aggregate functions
-  (`COUNT`, `SUM`, `AVG`, `GROUP BY`).
+  `LIMIT`/`OFFSET`, field projection, aggregate functions
+  (`COUNT`, `SUM`, `AVG`, `GROUP BY`), vector search functions
+  (`vector_distance()`, `cosine_distance()`), and geo functions
+  (`geo_distance()` in WHERE and SELECT clauses).
 - **Vectorizers** – `OpenAITextVectorizer`, `LiteLLMTextVectorizer`,
   `CustomTextVectorizer`, `AzureOpenAITextVectorizer`, `CohereTextVectorizer`,
-  `VoyageAITextVectorizer`, and `MistralAITextVectorizer`.
+  `VoyageAITextVectorizer`, `MistralAITextVectorizer`,
+  `AnthropicTextVectorizer` (Voyage AI-backed), and
+  `HuggingFaceTextVectorizer` (local ONNX via `fastembed`).
 - **Rerankers** – `CohereReranker` behind the `rerankers` feature flag with
   sync and async support.
 - **Extensions** – `EmbeddingsCache`, `SemanticCache`, `MessageHistory`,
@@ -39,10 +43,9 @@ of [Redis](https://redis.io/).
 
 ### Not yet implemented
 
-- Additional vectorizer providers (Vertex AI, Bedrock, HuggingFace local, Anthropic)
-- Vector/geo aggregate SQL functions
-- Provider-dependent semantic extension defaults
-- Richer CLI command/flag parity
+- Vertex AI and Bedrock vectorizer providers (source exists, not yet wired)
+- SQL date functions (`YEAR()`), `IS NULL`/`IS NOT NULL`, `HAVING`
+- Richer CLI command/flag parity (`load`, query commands)
 
 ## Quick start
 
@@ -210,14 +213,15 @@ Set `REDIS_URL` or pass `--redis-url` to override the default
 | `cohere` | | Cohere vectorizer |
 | `voyageai` | | VoyageAI vectorizer |
 | `mistral` | | Mistral vectorizer |
+| `anthropic` | | Anthropic adapter (Voyage AI-backed; requires `voyageai`) |
+| `hf-local` | | HuggingFace local ONNX embedding via `fastembed` |
 | `sql` | | SQL query support (`SQLQuery`) |
 | `rerankers` | | Reranker support (`CohereReranker`) |
-| `vertex-ai` | | Vertex AI adapter (planned) |
-| `bedrock` | | AWS Bedrock adapter (planned) |
-| `hf-local` | | HuggingFace local adapter (planned) |
-| `anthropic` | | Anthropic adapter (planned) |
+| `vertex-ai` | | Vertex AI adapter *(source exists, not yet wired)* |
+| `bedrock` | | AWS Bedrock adapter *(source exists, not yet wired)* |
 
-Flags marked *(planned)* are declared but not yet implemented.
+Flags marked *(not yet wired)* have source code but are not yet registered in
+the module tree or dependency graph.
 
 ## Examples
 

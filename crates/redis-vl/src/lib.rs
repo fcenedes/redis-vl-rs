@@ -34,6 +34,8 @@
 //! - `cohere` – Cohere vectorizer and reranker support
 //! - `voyageai` – VoyageAI vectorizer
 //! - `mistral` – Mistral vectorizer
+//! - `anthropic` – Anthropic adapter (Voyage AI-backed)
+//! - `hf-local` – HuggingFace local ONNX embedding via `fastembed`
 //! - `sql` – SQL query support (`SQLQuery`)
 //! - `rerankers` – Reranker support (`CohereReranker`)
 

@@ -52,6 +52,14 @@ let routes = vec![
 ];
 ```
 
-> Note: All extensions require a running Redis instance. Semantic extensions
+> **Note:** All extensions require a running Redis instance. Semantic extensions
 > additionally require a configured vectorizer for embedding generation.
+
+### Default vectorizer (zero-config)
+
+When the `hf-local` feature is enabled, `SemanticCache`, `SemanticMessageHistory`,
+and `SemanticRouter` provide a `with_default_vectorizer()` convenience method
+that automatically uses `HuggingFaceTextVectorizer` with the default model
+(`AllMiniLML6V2`). This is useful for quick prototyping without configuring an
+external embedding API.
 

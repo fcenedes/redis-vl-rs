@@ -15,15 +15,15 @@ and `AsyncVectorizer` trait (async) with several provider implementations.
 | Cohere | `cohere` | `CohereTextVectorizer` | Cohere embed API |
 | VoyageAI | `voyageai` | `VoyageAITextVectorizer` | VoyageAI embeddings API |
 | Mistral | `mistral` | `MistralAITextVectorizer` | Mistral embeddings API |
+| Anthropic | `anthropic` | `AnthropicTextVectorizer` | Voyage AI-backed adapter (Anthropic recommends Voyage AI for embeddings) |
+| HuggingFace local | `hf-local` | `HuggingFaceTextVectorizer` | Local ONNX embedding via `fastembed` — no external API required |
 
-### Planned (not yet implemented)
+### Not yet wired (source exists)
 
 | Provider | Feature flag | Status |
 | --- | --- | --- |
-| Vertex AI | `vertex-ai` | *Deferred* |
-| AWS Bedrock | `bedrock` | *Deferred* |
-| HuggingFace local | `hf-local` | *Deferred* |
-| Anthropic | `anthropic` | *Deferred* |
+| Vertex AI | `vertex-ai` | Source file exists; not yet registered in module tree |
+| AWS Bedrock | `bedrock` | Source file exists; not yet registered in module tree or dependencies |
 
 ## The Vectorizer trait
 
@@ -122,6 +122,45 @@ use redis_vl::{MistralAITextVectorizer, MistralConfig};
 # }
 ```
 
+## Anthropic vectorizer
+
+Anthropic does not provide its own embedding model. Instead, it
+[recommends Voyage AI](https://docs.anthropic.com/en/docs/build-with-claude/embeddings)
+for embedding tasks. The `AnthropicTextVectorizer` wraps `VoyageAITextVectorizer`
+with Anthropic-oriented defaults (default model: `voyage-3-large`).
+
+```rust,no_run
+# #[cfg(feature = "anthropic")]
+# {
+use redis_vl::{AnthropicTextVectorizer, AnthropicConfig};
+
+// Uses VOYAGE_API_KEY env var with the Anthropic-recommended default model
+let config = AnthropicConfig::from_env(Some("document".into())).unwrap();
+let vectorizer = AnthropicTextVectorizer::new(config);
+# }
+```
+
+## HuggingFace local vectorizer
+
+The `HuggingFaceTextVectorizer` runs embedding models locally using ONNX
+Runtime via the [`fastembed`](https://crates.io/crates/fastembed) crate. No
+external API or API key is required — models are downloaded from HuggingFace
+Hub on first use and cached on disk.
+
+```rust,no_run
+# #[cfg(feature = "hf-local")]
+# {
+use redis_vl::vectorizers::HuggingFaceTextVectorizer;
+
+// Uses the default model (AllMiniLML6V2)
+let vectorizer = HuggingFaceTextVectorizer::new(Default::default()).unwrap();
+// let embedding = vectorizer.embed("Hello, world!").unwrap();
+# }
+```
+
+> **Note:** `HuggingFaceTextVectorizer` implements `Vectorizer` (sync) only.
+> For async use cases, wrap calls with `tokio::task::spawn_blocking`.
+
 ## Using vectorizers with extensions
 
 Semantic extensions accept any type implementing `Vectorizer`:
@@ -134,4 +173,21 @@ let cache = SemanticCache::new(
     128, 0.2,
 );
 // cache = cache.with_vectorizer(my_vectorizer);
+```
+
+When the `hf-local` feature is enabled, semantic extensions also offer a
+`with_default_vectorizer()` convenience method that automatically uses
+`HuggingFaceTextVectorizer` with the default model — useful for quick
+prototyping without configuring an external API:
+
+```rust,no_run
+# #[cfg(feature = "hf-local")]
+# {
+use redis_vl::{SemanticCache, CacheConfig};
+
+let cache = SemanticCache::new(
+    CacheConfig::new("cache", "redis://127.0.0.1:6379"),
+    384, 0.2,
+).with_default_vectorizer().unwrap();
+# }
 ```

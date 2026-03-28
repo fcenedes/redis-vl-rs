@@ -22,19 +22,19 @@ Milestone status:
 - Milestone 0: partial`PARITY_MATRIX.md` exists and the Python tests are treated as the contract,but the matrix is still feature-granular rather than test-file-granular
 - Milestone 1: mostly completeworkspace, workflows, crate metadata, docs skeleton, and release scaffoldingare in place
 - Milestone 2: **complete**schema/filter/query/index foundations are real and Redis-backed with comprehensive parity test coverage; hybrid, aggregate, and multi-vector query command builders are implemented; multi-prefix schema/index support exists with parity tests; `from_existing` is implemented for both sync and async indexes
-- Milestone 3: substantially completeOpenAI/LiteLLM/Custom vectorizers plus Azure OpenAI, Cohere, VoyageAI, andMistral vectorizers are implemented; cache/history/router extensions exist;criterion micro-benchmarks exist; first publishable release criteria areapproaching but not yet fully met
-- Milestone 4: substantially complete`SQLQuery` is implemented behind `sql` with both non-aggregate SELECT and aggregate (`COUNT`, `SUM`, `AVG`, `GROUP BY`, etc.) support; automatic `FT.SEARCH`/`FT.AGGREGATE` dispatch helpers exist in both sync and async index; `CohereReranker` is implemented behind `rerankers`; Azure OpenAI, Cohere, VoyageAI, and Mistral vectorizers are done; Redis 8.4 integration tests for hybrid/aggregate/multi-vector queries are implemented and environment-gated; remaining: Vertex AI, Bedrock, HF local, SVS-VAMANA helpers
+- Milestone 3: **complete**OpenAI/LiteLLM/Custom vectorizers plus Azure OpenAI, Cohere, VoyageAI, Mistral, Anthropic (Voyage AI-backed), and HuggingFace local (via `fastembed`) vectorizers are implemented; cache/history/router extensions exist with `with_default_vectorizer()` convenience methods (behind `hf-local`); criterion micro-benchmarks exist
+- Milestone 4: **substantially complete**`SQLQuery` is implemented behind `sql` with non-aggregate SELECT, aggregate (`COUNT`, `SUM`, `AVG`, `GROUP BY`, etc.), vector search functions (`vector_distance()`, `cosine_distance()` → KNN), and geo functions (`geo_distance()` → `GEOFILTER` / `FT.AGGREGATE APPLY geodistance`); automatic `FT.SEARCH`/`FT.AGGREGATE` dispatch helpers exist in both sync and async index; `CohereReranker` is implemented behind `rerankers`; Redis 8.4 integration tests for hybrid/aggregate/multi-vector queries are implemented and environment-gated; Vertex AI and Bedrock adapter source exists but is not yet wired into the module tree; remaining: wire Vertex AI/Bedrock, SVS-VAMANA helpers, date SQL functions
 - Milestone 5: not started
 
 Implemented surface snapshot:
 
 - Schema:YAML/JSON parsing, field validation, hash/json storage selection, stopwords,vector attrs, multi-prefix support, and key-separator normalization
 - Filters:`Tag`, `Text`, `Num`, `Geo`, `GeoRadius`, `Timestamp`, boolean composition,and Redis syntax rendering
-- Queries:`VectorQuery`, `VectorRangeQuery`, `TextQuery`, `FilterQuery`, `CountQuery`,`HybridQuery` (generates `FT.HYBRID` for Redis 8.4+),`AggregateHybridQuery` (generates `FT.AGGREGATE`),`MultiVectorQuery` (generates multi-vector aggregate commands),`SQLQuery` (SQL→Redis Search translation behind `sql` feature, including aggregate SQL with `COUNT`/`SUM`/`AVG`/`GROUP BY` via `FT.AGGREGATE` dispatch)
+- Queries:`VectorQuery`, `VectorRangeQuery`, `TextQuery`, `FilterQuery`, `CountQuery`,`HybridQuery` (generates `FT.HYBRID` for Redis 8.4+),`AggregateHybridQuery` (generates `FT.AGGREGATE`),`MultiVectorQuery` (generates multi-vector aggregate commands),`SQLQuery` (SQL→Redis Search translation behind `sql` feature, including aggregate SQL with `COUNT`/`SUM`/`AVG`/`GROUP BY` via `FT.AGGREGATE` dispatch, vector search functions `vector_distance()`/`cosine_distance()` → KNN, and geo functions `geo_distance()` → `GEOFILTER`/`FT.AGGREGATE APPLY geodistance`)
 - Search index:sync + async `create`, `delete`, `drop`, `exists`, `listall`, `info`, `load`,`fetch`, `search`, `query`, `batch_search`, `batch_query`, `paginate`,`hybrid_search`, `hybrid_query`, `aggregate_query`, `multi_vector_query`,`from_existing`, `drop_*`, `expire_*`, and `clear`
-- Vectorizers:`Vectorizer`, `AsyncVectorizer`, `OpenAITextVectorizer`,`LiteLLMTextVectorizer`, `CustomTextVectorizer`,`AzureOpenAITextVectorizer`, `CohereTextVectorizer`,`VoyageAITextVectorizer`, and `MistralAITextVectorizer`
+- Vectorizers:`Vectorizer`, `AsyncVectorizer`, `OpenAITextVectorizer`,`LiteLLMTextVectorizer`, `CustomTextVectorizer`,`AzureOpenAITextVectorizer`, `CohereTextVectorizer`,`VoyageAITextVectorizer`, `MistralAITextVectorizer`,`AnthropicTextVectorizer` (Voyage AI-backed adapter), and`HuggingFaceTextVectorizer` (local ONNX via `fastembed`, behind `hf-local`)
 - Rerankers:`Reranker`, `AsyncReranker` traits, and `CohereReranker` (behind`rerankers` feature)
-- Extensions:`EmbeddingsCache`, `SemanticCache`, `MessageHistory`,`SemanticMessageHistory`, and `SemanticRouter` are all Redis-backed
+- Extensions:`EmbeddingsCache`, `SemanticCache`, `MessageHistory`,`SemanticMessageHistory`, and `SemanticRouter` are all Redis-backed; semantic extensions provide `with_default_vectorizer()` convenience methods behind the `hf-local` feature for zero-config local embedding
 - CLI:`rvl version`, `index create/delete/destroy/info/listall`, and `stats`
 - Benchmarks:criterion micro-benchmarks for schema parsing, filter rendering, and querybuilding; Redis-backed benchmarks for search index (create/exists/info/load/fetch), search (vector/filter/count/batch/paginate), embeddings cache, semantic cache, message history, and semantic message history
 
@@ -42,12 +42,10 @@ The repository does **not** yet have full parity with Python RedisVL.
 
 The biggest remaining gaps are:
 
-- Vertex AI, Bedrock, and HuggingFace local vectorizer providers (deferred)
-- Anthropic vectorizer adapter (deferred)
-- richer CLI parity and CLI tests
+- Vertex AI and Bedrock vectorizer adapters (source exists, not yet wired into module tree or dependency graph)
+- richer CLI parity (load, query commands) and CLI tests
 - Rust-vs-Python comparison benchmark runs
-- provider-dependent default-vectorizer selection for semantic extensions (deferred pending provider work)
-- vector/geo aggregate SQL functions (deferred)
+- SQL date functions (`YEAR()`), `IS NULL`/`IS NOT NULL`, `HAVING` clause
 - examples and docs expansion
 
 ## Validation Source of Truth
@@ -108,6 +106,10 @@ Primary implementation files:
 - `crates/redis-vl/src/vectorizers/cohere.rs`
 - `crates/redis-vl/src/vectorizers/voyageai.rs`
 - `crates/redis-vl/src/vectorizers/mistral.rs`
+- `crates/redis-vl/src/vectorizers/anthropic.rs`
+- `crates/redis-vl/src/vectorizers/hf_local.rs`
+- `crates/redis-vl/src/vectorizers/vertex_ai.rs` *(not yet wired in mod.rs)*
+- `crates/redis-vl/src/vectorizers/bedrock.rs` *(not yet wired in mod.rs)*
 - `crates/redis-vl/src/rerankers/mod.rs`
 - `crates/redis-vl/src/rerankers/cohere.rs`
 - `crates/redis-vl/src/extensions/cache.rs`
@@ -146,9 +148,13 @@ Upstream Python test files already partially mirrored:
 Important caution for a takeover session:
 
 - `HybridQuery`, `AggregateHybridQuery`, and `MultiVectorQuery` command buildersare implemented and covered by environment-gated Redis 8.4 integration tests in`python_parity_hybrid_aggregate.rs`; these require a Redis 8.4+ server with`FT.HYBRID` and `FT.AGGREGATE` support
-- `SQLQuery` covers both non-aggregate SELECT queries and aggregate SQL(`COUNT`, `SUM`, `AVG`, `GROUP BY`, etc.) with automatic `FT.SEARCH`/`FT.AGGREGATE`dispatch in `SearchIndex::sql_query` and `AsyncSearchIndex::sql_query`;vector/geo aggregate functions are not yet supported
-- `SemanticMessageHistory` has full dtype support, overwrite/reconnect with schema mismatch detection, and parity tests; provider-dependent default-vectorizer selection is deferred
-- `SemanticRouter` has full dtype support, overwrite/reconnect with schema mismatch detection, `from_existing`, `from_dict`, `from_yaml`, `to_dict`/`to_json_value` serialization, and route reference management with parity tests; provider-dependent default-vectorizer selection is deferred
+- `SQLQuery` covers non-aggregate SELECT, aggregate SQL (`COUNT`, `SUM`, `AVG`, `GROUP BY`, etc.), vector search functions (`vector_distance()`/`cosine_distance()` → KNN), and geo functions (`geo_distance()` in WHERE → `GEOFILTER`, in SELECT → `FT.AGGREGATE APPLY geodistance`) with automatic `FT.SEARCH`/`FT.AGGREGATE` dispatch in `SearchIndex::sql_query` and `AsyncSearchIndex::sql_query`; remaining SQL gaps: date functions (`YEAR()`), `IS NULL`/`IS NOT NULL`, `HAVING`; the SQL parser uses a hand-rolled tokenizer — adopting `sqlparser-rs` is deferred as the current approach provides better Redis-specific translation control
+- `AnthropicTextVectorizer` is a Voyage AI-backed adapter (Anthropic recommends Voyage AI for embeddings rather than providing a native embedding model); it wraps `VoyageAITextVectorizer` with Anthropic-oriented defaults and uses `VOYAGE_API_KEY`
+- `HuggingFaceTextVectorizer` (behind `hf-local`) runs models locally via `fastembed` / ONNX Runtime; implements `Vectorizer` only (sync); for async use, wrap with `tokio::task::spawn_blocking`
+- `SemanticMessageHistory` has full dtype support, overwrite/reconnect with schema mismatch detection, parity tests, and `with_default_vectorizer()` behind `hf-local`
+- `SemanticRouter` has full dtype support, overwrite/reconnect with schema mismatch detection, `from_existing`, `from_dict`, `from_yaml`, `to_dict`/`to_json_value` serialization, route reference management with parity tests, and `with_default_vectorizer()` behind `hf-local`
+- `SemanticCache` provides `with_default_vectorizer()` behind `hf-local` for zero-config local embedding
+- Vertex AI (`vertex_ai.rs`) and Bedrock (`bedrock.rs`) adapter source files exist but are NOT registered in `vectorizers/mod.rs` and NOT exported from `lib.rs`; Bedrock additionally requires `aws-sdk-bedrockruntime` and `aws-config` dependencies which are not yet in `Cargo.toml`
 - Multi-prefix schema parsing and index creation are implemented; key compositionfor multi-prefix loading uses the first prefix
 
 ## Summary
@@ -207,7 +213,9 @@ Important caution for a takeover session:
   - `sql`
   - `rerankers`
 - `litellm` is implemented as a thin OpenAI-compatible transport/config layer
-- `anthropic` is a later additive adapter, not a parity blocker
+- `anthropic` depends on `voyageai` (Anthropic recommends Voyage AI for embeddings)
+- `hf-local` depends on `dep:fastembed` for local ONNX Runtime inference
+- `vertex-ai` and `bedrock` feature flags are declared but their modules are not yet registered in `mod.rs`; `bedrock` additionally needs `aws-sdk-bedrockruntime` and `aws-config` dependencies added to `Cargo.toml`
 
 ## Coverage Matrix
 
@@ -220,14 +228,14 @@ This table is the compact handoff view. `PARITY_MATRIX.md` should stay alignedwi
 | Storage | **Complete** | Hash + JSON loading/fetching are implemented with multi-prefix index support | — |
 | Filters | **Complete** | Core DSL, boolean composition, and Redis syntax rendering implemented with comprehensive unit and integration coverage | — |
 | Queries | **Complete** | Vector/Range/Text/Filter/Count implemented; HybridQuery/AggregateHybridQuery/MultiVectorQuery have full command builders with Redis 8.4 integration tests | — |
-| SQL | **Complete** | SQLQuery behind sql feature: non-aggregate SELECT with WHERE/ORDER BY/LIMIT/OFFSET, tag/numeric/text/date comparisons, AND/OR, IN/NOT IN, LIKE/NOT LIKE, BETWEEN, field projection; aggregate SQL (COUNT, SUM, AVG, GROUP BY, etc.) via FT.AGGREGATE with auto-dispatch helpers in SearchIndex/AsyncSearchIndex. Vector/geo aggregate functions are deferred | Vector/geo aggregate functions (deferred) |
-| Vectorizers | In progress | OpenAI, LiteLLM, Custom, Azure OpenAI, Cohere, VoyageAI, and Mistral implemented | Vertex AI, Bedrock, HF local (deferred) |
-| Semantic cache | **Complete** | Redis-backed sync/async core implemented and parity-tested (19 integration tests) | — |
+| SQL | **Complete** | SQLQuery behind sql feature: non-aggregate SELECT with WHERE/ORDER BY/LIMIT/OFFSET, tag/numeric/text/date comparisons, AND/OR, IN/NOT IN, LIKE/NOT LIKE, BETWEEN, field projection; aggregate SQL (COUNT, SUM, AVG, GROUP BY, etc.) via FT.AGGREGATE; vector search functions (`vector_distance()`/`cosine_distance()` → KNN); geo functions (`geo_distance()` in WHERE → `GEOFILTER`, in SELECT → `FT.AGGREGATE APPLY geodistance`); auto-dispatch helpers in SearchIndex/AsyncSearchIndex. SQL parser uses a hand-rolled tokenizer (recommended over `sqlparser-rs` for Redis-specific control) | Date functions, `IS NULL`/`IS NOT NULL`, `HAVING` |
+| Vectorizers | **Substantially complete** | OpenAI, LiteLLM, Custom, Azure OpenAI, Cohere, VoyageAI, Mistral, Anthropic (Voyage AI-backed adapter), and HuggingFace local (via `fastembed` / ONNX, behind `hf-local`) are implemented and wired. Vertex AI and Bedrock adapter source files exist but are not yet wired into the module tree or dependency graph | Wire Vertex AI/Bedrock into module tree |
+| Semantic cache | **Complete** | Redis-backed sync/async core implemented and parity-tested (19 integration tests); `with_default_vectorizer()` available behind `hf-local` | — |
 | Embeddings cache | **Complete** | Redis-backed sync/async core implemented and parity-tested (12 integration tests) | — |
 | Message history | **Complete** | Standard history implemented with role filtering and parity tests (4 history + 3 role-filter tests) | — |
-| Semantic message history | **Complete** | Semantic history implemented and parity-tested (7 integration tests); dtype selection, overwrite control, and reconnect with schema mismatch detection are implemented. Provider-dependent default-vectorizer selection is deferred | Provider-dependent defaults (deferred) |
-| Router | **Complete** | Redis-backed routing/update/lifecycle core implemented and parity-tested (20 integration tests); dtype selection, overwrite control, reconnect with schema mismatch detection, `from_existing`, `from_dict`/`from_yaml` serialization, and route reference management are implemented. Provider-dependent default-vectorizer selection is deferred | Provider-dependent defaults (deferred) |
-| CLI | In progress | Basic command surface implemented (5 CLI smoke tests) | More Python CLI parity, tests, and UX polishing |
+| Semantic message history | **Complete** | Semantic history implemented and parity-tested (7 integration tests); dtype selection, overwrite control, reconnect with schema mismatch detection, and `with_default_vectorizer()` (behind `hf-local`) are implemented | — |
+| Router | **Complete** | Redis-backed routing/update/lifecycle core implemented and parity-tested (20 integration tests); dtype selection, overwrite control, reconnect with schema mismatch detection, `from_existing`, `from_dict`/`from_yaml` serialization, route reference management, and `with_default_vectorizer()` (behind `hf-local`) are implemented | — |
+| CLI | In progress | `version` (with `--short`), `index create/delete/destroy/info/listall`, `stats` (Python-matching keys), `--index`/`--schema` alternatives, `--redis-url`/`REDIS_URL` (5 CLI smoke tests) | `load`, query commands, richer output formatting |
 | Rerankers | **Complete** | Reranker/AsyncReranker traits and CohereReranker behind rerankers feature | Additional reranker providers |
 | Benchmarks | In progress | Criterion micro-benchmarks for schema/filter/query; Redis-backed benchmarks for search index ops, vector/filter/count/batch/paginate search, embeddings cache, semantic cache, message history, and semantic history | Rust-vs-Python comparison runner |
 | Docs/examples | In progress | README, mdBook guide, and repo scaffolding exist | Expand rustdoc, examples, guides, docs deployment quality |
@@ -259,9 +267,9 @@ This table is the compact handoff view. `PARITY_MATRIX.md` should stay alignedwi
 
 ### Milestone 3: First publishable Rust release
 
-- Status: substantially complete
-- `Vectorizer` trait, OpenAI-compatible transport, `OpenAITextVectorizer`,`LiteLLMTextVectorizer`, `CustomVectorizer`, `AzureOpenAITextVectorizer`,`CohereTextVectorizer`, `VoyageAITextVectorizer`, and`MistralAITextVectorizer` are implemented
-- `SemanticCache`, `EmbeddingsCache`, `MessageHistory`,`SemanticMessageHistory`, and `SemanticRouter` are implemented
+- Status: **complete**
+- `Vectorizer` trait, OpenAI-compatible transport, `OpenAITextVectorizer`,`LiteLLMTextVectorizer`, `CustomVectorizer`, `AzureOpenAITextVectorizer`,`CohereTextVectorizer`, `VoyageAITextVectorizer`, `MistralAITextVectorizer`,`AnthropicTextVectorizer` (Voyage AI-backed), and `HuggingFaceTextVectorizer`(local ONNX via `fastembed`) are implemented
+- `SemanticCache`, `EmbeddingsCache`, `MessageHistory`,`SemanticMessageHistory`, and `SemanticRouter` are implemented with`with_default_vectorizer()` convenience methods behind `hf-local`
 - Criterion micro-benchmarks exist
 - Publish `0.x` only when:
   - all Phase 1 rows are green
@@ -271,30 +279,29 @@ This table is the compact handoff view. `PARITY_MATRIX.md` should stay alignedwi
 
 ### Milestone 4: Parity completion
 
-- Status: substantially complete
-- `SQLQuery` is implemented behind `sql` with both non-aggregate SELECT and aggregate SQL (`COUNT`, `SUM`, `AVG`, `GROUP BY`, etc.) support; automatic `FT.SEARCH`/`FT.AGGREGATE` dispatch exists in sync and async index
+- Status: **substantially complete**
+- `SQLQuery` is implemented behind `sql` with non-aggregate SELECT, aggregate SQL (`COUNT`, `SUM`, `AVG`, `GROUP BY`, etc.), vector search functions (`vector_distance()`/`cosine_distance()` → KNN), and geo functions (`geo_distance()` → `GEOFILTER`/`FT.AGGREGATE APPLY geodistance`); automatic `FT.SEARCH`/`FT.AGGREGATE` dispatch exists in sync and async index; SQL parser uses a hand-rolled tokenizer (recommended over `sqlparser-rs` for Redis-specific translation control and small dependency footprint)
 - `CohereReranker` is implemented behind `rerankers`
-- Azure OpenAI, Cohere, VoyageAI, and Mistral vectorizers are implemented
+- All actively-wired vectorizer providers are done (see Milestone 3)
 - Redis 8.4 integration tests for hybrid/aggregate/multi-vector queries are implemented
-- Remaining: Vertex AI, Bedrock, HF local, SVS-VAMANA helpers, vector/geo aggregate SQL functions
+- Remaining: wire Vertex AI/Bedrock source into module tree and dependencies, SVS-VAMANA helpers, SQL date functions
 - Cut `1.0.0` only after the parity matrix has no remaining Python-surface gaps
 
 ### Milestone 5: Post-parity additions
 
 - Status: not started
-- Add Anthropic and any other OpenAI-compatible or ecosystem-driven adapters
+- Wire Vertex AI and Bedrock adapters (source files exist, need `mod.rs` registration and dependency wiring)
 - Add Rust-native ergonomics only after parity is complete and documented
 
 ## Recommended Next Work Order
 
 If a new agent/session takes over, the recommended order is:
 
-1. Remaining vectorizer providersAdd Vertex AI, Bedrock, and HuggingFace local vectorizers
-2. CLI parity and CLI testsExpand `crates/rvl/src/main.rs` and add CLI-focused tests mirroring Python CLIexpectations where possible
-3. Provider-dependent semantic defaultsAdd default-vectorizer selection to `SemanticCache`, `SemanticMessageHistory`, and `SemanticRouter` once more providers are available
-4. Vector/geo aggregate SQL functionsExtend aggregate SQL support in `crates/redis-vl/src/query/sql.rs` to covervector distance and geo functions
-5. Rust-vs-Python benchmark comparison runner
-6. Examples and docs expansion
+1. Wire Vertex AI and Bedrock adaptersRegister `vertex_ai.rs` and `bedrock.rs` in `vectorizers/mod.rs`, add required dependencies (`aws-sdk-bedrockruntime`, `aws-config` for Bedrock), add `lib.rs` re-exports, and verify compilation under their feature flags
+2. CLI parity and CLI testsExpand `crates/rvl/src/main.rs` with `load` and query commands; add CLI-focused tests mirroring Python CLI expectations where possible
+3. SQL date functions and remaining SQL gapsAdd `YEAR()`, `IS NULL`/`IS NOT NULL`, `HAVING` to the hand-rolled SQL parser
+4. Rust-vs-Python benchmark comparison runner
+5. Examples and docs expansion
 
 ## Takeover Checklist
 
