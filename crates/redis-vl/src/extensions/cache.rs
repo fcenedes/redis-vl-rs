@@ -194,6 +194,21 @@ impl SemanticCache {
         self
     }
 
+    /// Attaches the default HuggingFace local vectorizer.
+    ///
+    /// This uses the `AllMiniLML6V2` model from [`fastembed`] which runs
+    /// locally via ONNX Runtime and requires no API key. The model is
+    /// downloaded from HuggingFace Hub on first use.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the model cannot be loaded.
+    #[cfg(feature = "hf-local")]
+    pub fn with_default_vectorizer(self) -> Result<Self> {
+        let vectorizer = crate::vectorizers::HuggingFaceTextVectorizer::new(Default::default())?;
+        Ok(self.with_vectorizer(vectorizer))
+    }
+
     /// Replaces the vectorizer used for prompt embedding.
     pub fn set_vectorizer<V>(&mut self, vectorizer: V)
     where

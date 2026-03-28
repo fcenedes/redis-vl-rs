@@ -499,6 +499,34 @@ impl SemanticMessageHistory {
         })
     }
 
+    /// Creates a new semantic message history using the default HuggingFace
+    /// local vectorizer (`AllMiniLML6V2`).
+    ///
+    /// This convenience constructor requires no API key — the model runs
+    /// locally via ONNX Runtime and is downloaded from HuggingFace Hub on
+    /// first use.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the model cannot be loaded or the index cannot be
+    /// created.
+    #[cfg(feature = "hf-local")]
+    pub fn with_default_vectorizer(
+        name: impl Into<String>,
+        redis_url: impl Into<String>,
+        distance_threshold: f32,
+        vector_dimensions: usize,
+    ) -> Result<Self> {
+        let vectorizer = crate::vectorizers::HuggingFaceTextVectorizer::new(Default::default())?;
+        Self::new(
+            name,
+            redis_url,
+            distance_threshold,
+            vector_dimensions,
+            vectorizer,
+        )
+    }
+
     /// Returns the default session tag used when no explicit session is supplied.
     pub fn default_session_tag(&self) -> &str {
         self.history.default_session_tag()

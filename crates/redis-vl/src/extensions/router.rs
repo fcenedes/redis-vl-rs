@@ -144,6 +144,28 @@ impl SemanticRouter {
         )
     }
 
+    /// Creates a new semantic router using the default HuggingFace local
+    /// vectorizer (`AllMiniLML6V2`).
+    ///
+    /// This convenience constructor requires no API key — the model runs
+    /// locally via ONNX Runtime and is downloaded from HuggingFace Hub on
+    /// first use.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the model cannot be loaded or the index cannot be
+    /// created.
+    #[cfg(feature = "hf-local")]
+    pub fn with_default_vectorizer(
+        name: impl Into<String>,
+        redis_url: impl Into<String>,
+        routes: Vec<Route>,
+        routing_config: RoutingConfig,
+    ) -> Result<Self> {
+        let vectorizer = crate::vectorizers::HuggingFaceTextVectorizer::new(Default::default())?;
+        Self::new(name, redis_url, routes, routing_config, vectorizer)
+    }
+
     /// Creates a new semantic router with explicit dtype and overwrite control.
     pub fn new_with_options<V>(
         name: impl Into<String>,

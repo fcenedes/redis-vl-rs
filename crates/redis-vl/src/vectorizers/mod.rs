@@ -7,6 +7,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 
+#[cfg(feature = "anthropic")]
+mod anthropic;
+#[cfg(feature = "anthropic")]
+pub use self::anthropic::{AnthropicConfig, AnthropicTextVectorizer};
+
 #[cfg(feature = "azure-openai")]
 mod azure_openai;
 #[cfg(feature = "azure-openai")]
@@ -16,6 +21,11 @@ pub use azure_openai::{AzureOpenAIConfig, AzureOpenAITextVectorizer};
 mod cohere;
 #[cfg(feature = "cohere")]
 pub use self::cohere::{CohereConfig, CohereTextVectorizer};
+
+#[cfg(feature = "hf-local")]
+mod hf_local;
+#[cfg(feature = "hf-local")]
+pub use self::hf_local::{HuggingFaceConfig, HuggingFaceTextVectorizer};
 
 #[cfg(feature = "mistral")]
 mod mistral;
