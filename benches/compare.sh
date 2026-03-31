@@ -51,6 +51,12 @@ mkdir -p "$OUT_DIR"
 VENV_DIR="$OUT_DIR/.venv"
 
 echo ">>> Setting up Python virtualenv via uv …" >&2
+# If the venv dir exists but is not a valid virtualenv (e.g. partial leftover
+# from an interrupted run), remove it so uv venv can recreate it cleanly.
+if [[ -d "$VENV_DIR" && ! -f "$VENV_DIR/pyvenv.cfg" ]]; then
+    echo "  Detected stale virtualenv directory; clearing …" >&2
+    rm -rf "$VENV_DIR"
+fi
 uv venv "$VENV_DIR" --quiet 2>&1 >&2
 uv pip install --quiet -r "$SCRIPT_DIR/python/requirements.txt" -p "$VENV_DIR/bin/python" 2>&1 >&2
 
