@@ -114,7 +114,24 @@ jobs:
 
       - name: Publish redis-vl
         if: github.event_name == 'push' && steps.crates.outputs.redis_vl_published != 'true'
-        run: cargo publish -p redis-vl
+        shell: bash
+        run: |
+          set +e
+          output="$(cargo publish -p redis-vl 2>&1)"
+          status=$?
+          set -e
+          echo "$output"
+
+          if [ "$status" -eq 0 ]; then
+            exit 0
+          fi
+
+          if grep -q "already exists on crates.io index" <<< "$output"; then
+            echo "redis-vl ${{ steps.version.outputs.version }} is already published; continuing"
+            exit 0
+          fi
+
+          exit "$status"
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
@@ -125,9 +142,21 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           for attempt in {1..120}; do
-            if cargo publish -p rvl --dry-run; then
+            set +e
+            output="$(cargo publish -p rvl --dry-run 2>&1)"
+            status=$?
+            set -e
+            echo "$output"
+
+            if [ "$status" -eq 0 ]; then
               exit 0
             fi
+
+            if grep -q "already exists on crates.io index" <<< "$output"; then
+              echo "rvl ${{ steps.version.outputs.version }} is already published; continuing"
+              exit 0
+            fi
+
             echo "rvl cannot resolve redis-vl ${{ steps.version.outputs.version }} yet; waiting ($attempt/120)..."
             sleep 15
           done
@@ -137,7 +166,24 @@ jobs:
 
       - name: Publish rvl
         if: github.event_name == 'push' && steps.crates.outputs.rvl_published != 'true'
-        run: cargo publish -p rvl
+        shell: bash
+        run: |
+          set +e
+          output="$(cargo publish -p rvl 2>&1)"
+          status=$?
+          set -e
+          echo "$output"
+
+          if [ "$status" -eq 0 ]; then
+            exit 0
+          fi
+
+          if grep -q "already exists on crates.io index" <<< "$output"; then
+            echo "rvl ${{ steps.version.outputs.version }} is already published; continuing"
+            exit 0
+          fi
+
+          exit "$status"
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 

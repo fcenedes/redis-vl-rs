@@ -110,7 +110,9 @@ The `Publish` workflow runs on `v*` tags and does the release:
 The workflow is idempotent for partial releases: if `redis-vl` or `rvl` at the
 target version is already visible on crates.io, the matching publish step is
 skipped. The crates.io dependency-resolution wait allows up to 30 minutes before
-failing.
+failing. The publish steps also treat Cargo's "already exists on crates.io
+index" response as success, so rerunning a tag after a partial release can
+continue to the next missing step.
 
 When the GitHub Release is published, the `Release Binaries` workflow runs and
 attaches the cross-platform `rvl` binaries.
