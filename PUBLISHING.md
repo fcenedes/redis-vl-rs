@@ -107,6 +107,10 @@ The `Publish` workflow runs on `v*` tags and does the release:
 7. Publishes `rvl`.
 8. Creates the GitHub Release.
 
+The workflow is idempotent for partial releases: if `redis-vl` or `rvl` at the
+target version is already visible on crates.io, the matching publish step is
+skipped. The crates.io indexing wait allows up to 30 minutes before failing.
+
 When the GitHub Release is published, the `Release Binaries` workflow runs and
 attaches the cross-platform `rvl` binaries.
 
@@ -134,9 +138,11 @@ the GitHub Release.
 
 - If verification fails before publish, fix the issue, delete and recreate the
   tag locally, then force-update the remote tag only if no crates were published.
-- If `redis-vl` publishes but `rvl` fails before publishing, do not reuse the
-  same library version. Fix the issue, bump both crates to a new patch version,
-  and release a new tag.
+- If `redis-vl` publishes but `rvl` fails before publishing, first fix the
+  workflow and rerun the release against the same tag. The publish job skips
+  already-published crate versions and continues with the missing crate. If the
+  crate package contents need to change, bump both crates to a new patch version
+  instead.
 - If both crates publish but the GitHub Release or binaries fail, rerun or
   manually run the `Release Binaries` workflow for the existing tag.
 - crates.io versions are immutable. Never try to republish the same crate
