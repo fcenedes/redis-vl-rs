@@ -56,8 +56,8 @@ rustdoc-args = ["--cfg", "docsrs"]
 workspace = true
 
 [dev-dependencies]
-criterion = { version = "0.7.0", features = ["html_reports"] }
-rand = "0.8"
+criterion = { version = "0.8.2", features = ["html_reports"] }
+rand = "0.9"
 
 [[bench]]
 name = "core_benchmarks"
