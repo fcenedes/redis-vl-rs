@@ -1,112 +1,146 @@
 # Publishing
 
-This repository publishes two crates:
+This repository uses a tag-driven release flow.
+
+- Pull requests and normal pushes run verification only.
+- Pushing a `v*` tag publishes crates, creates the GitHub Release, and builds
+  release binaries.
+
+The release source of truth is the workspace version in `Cargo.toml`. A release
+tag must match that version exactly, for example `version = "0.1.1"` must be
+released with tag `v0.1.1`.
+
+## What Gets Published
+
+This workspace publishes two crates:
 
 - `redis-vl`, the public Rust library
 - `rvl`, the CLI crate
 
-`rvl` depends on `redis-vl` by version, so publish `redis-vl` first and wait for
-it to appear in the crates.io index before publishing `rvl`.
+`rvl` depends on `redis-vl` by version. The release workflow therefore publishes
+`redis-vl` first, waits for crates.io indexing, then publishes `rvl`.
 
-## Required GitHub Secrets
+The `rvl` binary is also built for GitHub Releases on:
+
+- Linux: `rvl-linux-x86_64`
+- macOS: `rvl-macos-aarch64`
+- Windows: `rvl-windows-x86_64.exe`
+
+## Required Setup
+
+Add this repository secret:
 
 - `CARGO_REGISTRY_TOKEN`: crates.io API token used by `.github/workflows/publish.yml`
 
 Create it in GitHub under Settings -> Secrets and variables -> Actions. The
 token comes from crates.io Account Settings -> API Tokens.
 
-GitHub Pages, release PRs, and GitHub Releases use the built-in `GITHUB_TOKEN`;
-they do not need extra repository secrets.
+GitHub Pages, release creation, and binary uploads use the built-in
+`GITHUB_TOKEN`; no extra GitHub secret is required.
 
-## First Release
+## Normal Development Flow
 
-1. Verify the workspace locally:
+For pull requests and normal pushes to `main`, no publishing happens.
 
-   ```bash
-   cargo fmt --all --check
-   cargo check --workspace --all-features
-   cargo test --workspace --all-features
-   RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
-   cargo audit
-   cargo deny check
-   cargo package -p redis-vl
-   ```
+These workflows are verification-only:
 
-2. Confirm the crate names are available on crates.io:
+- `CI`: formatting, checks, clippy, tests, docs, and library packaging
+- `Security`: `cargo audit` and `cargo deny check`
+- `Docs`: mdBook and rustdoc deployment
+- `Benchmarks`: manual benchmark runs
 
-   ```bash
-   cargo search redis-vl
-   cargo search rvl
-   ```
+`release-plz` is manual-only. GitHub blocks Actions-created pull requests unless
+Settings -> Actions -> General -> "Allow GitHub Actions to create and approve
+pull requests" is enabled, and this project does not rely on release PRs for
+publishing.
 
-3. Publish the library:
+## Local Preflight
 
-   ```bash
-   cargo publish -p redis-vl
-   ```
+Before tagging a release, run:
 
-4. Wait for `redis-vl` to appear in the crates.io index.
+```bash
+cargo fmt --all --check
+cargo check --workspace --all-features
+cargo test --workspace --all-features
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
+cargo audit
+cargo deny check
+cargo package -p redis-vl
+```
 
-5. Publish the CLI:
+Optional but recommended:
 
-   ```bash
-   cargo publish -p rvl
-   ```
+```bash
+cargo clippy --workspace --all-targets --all-features
+mdbook build docs
+```
 
-6. Create the release tag locally and push it:
+`cargo clippy --workspace --all-targets --all-features -- -D warnings` is still
+a known lint-debt follow-up. CI tracks it as non-blocking.
+
+## Tag-Driven Release
+
+1. Update the workspace version in `Cargo.toml`.
+
+2. Update `crates/rvl/Cargo.toml` so its `redis-vl` dependency uses the same
+   version.
+
+3. Update `CHANGELOG.md` and any visible version references in docs.
+
+4. Commit and push `main`.
+
+5. Create and push the matching version tag:
 
    ```bash
    git tag v0.1.1
    git push origin v0.1.1
    ```
 
-   Pushing a `v*` tag runs the `Publish` workflow. That workflow verifies the
-   workspace, publishes `redis-vl`, waits for crates.io indexing, publishes
-   `rvl`, and creates the GitHub Release.
+The `Publish` workflow runs on `v*` tags and does the release:
 
-7. The `Release Binaries` workflow runs when the GitHub Release is published:
+1. Verifies the tag matches the Cargo version.
+2. Runs formatting, checks, tests, docs, audit, deny, and packaging.
+3. Runs `cargo publish -p redis-vl --dry-run`.
+4. Publishes `redis-vl`.
+5. Waits for `redis-vl` to appear in the crates.io index.
+6. Runs `cargo publish -p rvl --dry-run`.
+7. Publishes `rvl`.
+8. Creates the GitHub Release.
 
-   - It builds `rvl` on Linux, macOS, and Windows.
-   - It attaches the binaries to the GitHub Release.
+When the GitHub Release is published, the `Release Binaries` workflow runs and
+attaches the cross-platform `rvl` binaries.
 
-## Automated Publishing
+## Dry Runs
 
-Publishing is tag-driven:
+The manual `Publish` workflow is for dry-runs only. It verifies the workspace
+and runs `cargo publish -p redis-vl --dry-run`.
 
-```bash
-git tag v0.1.1
-git push origin v0.1.1
-```
+The `rvl` dry-run runs only during a tag release because `rvl` needs the matching
+`redis-vl` version to exist in the crates.io index after the library publish.
 
-Use the manual `Publish` workflow in GitHub Actions only for dry-runs:
+## Rebuilding Release Binaries
 
-- It verifies the workspace.
-- It runs `cargo publish -p redis-vl --dry-run`.
-- The `rvl` dry-run runs only on tag releases, after `redis-vl` has been
-  published and indexed.
-
-`release-plz.yml` currently creates release PRs. Actual crate publication is
-driven by pushing version tags so normal PRs and pushes only run verification.
-The `release-plz` workflow is manual because GitHub blocks Actions-created pull
-requests unless Settings -> Actions -> General -> "Allow GitHub Actions to
-create and approve pull requests" is enabled.
-
-## GitHub Release Binaries
-
-The `Publish` workflow creates the GitHub Release automatically after both
-crates publish successfully. The `Release Binaries` workflow then runs from the
-GitHub `release.published` event.
-
-Use the `Release Binaries` workflow manually only when rebuilding binaries for
-an existing release:
+If a GitHub Release already exists and you only need to rebuild/upload binaries:
 
 1. Open Actions -> Release Binaries.
 2. Run the workflow from `main`.
 3. Set `tag` to an existing release tag, for example `v0.1.1`.
 
-The workflow checks out the tag, builds `cargo build -p rvl --release --locked`
-on Linux, macOS, and Windows, uploads workflow artifacts, and attaches the
-artifacts to the GitHub Release.
+The workflow checks out that tag, builds `cargo build -p rvl --release --locked`
+on Linux, macOS, and Windows, uploads workflow artifacts, and attaches them to
+the GitHub Release.
+
+## Failure Recovery
+
+- If verification fails before publish, fix the issue, delete and recreate the
+  tag locally, then force-update the remote tag only if no crates were published.
+- If `redis-vl` publishes but `rvl` fails before publishing, do not reuse the
+  same library version. Fix the issue, bump both crates to a new patch version,
+  and release a new tag.
+- If both crates publish but the GitHub Release or binaries fail, rerun or
+  manually run the `Release Binaries` workflow for the existing tag.
+- crates.io versions are immutable. Never try to republish the same crate
+  version after crates.io accepts it.
 
 ## Trusted Publishing
 
@@ -120,13 +154,11 @@ Trusted Publishing removes the long-lived GitHub secret, but it must be
 configured per crate on crates.io before the workflow can exchange an OIDC token
 for a short-lived publishing token.
 
-## Current Release Blockers
+## Current Release Notes
 
-- `cargo clippy --workspace --all-targets --all-features -- -D warnings` is not
-  yet clean because of existing strict pedantic/cargo lint debt. CI runs strict
-  clippy as a non-blocking debt tracker until that is resolved.
 - `cargo audit` currently has no vulnerability findings. It reports one allowed
   unmaintained warning through optional `hf-local` dependencies (`paste` via
   `fastembed`/`tokenizers`).
-- `cargo package -p rvl` succeeds only after `redis-vl` exists in the crates.io
-  index.
+- `cargo deny check` passes. Duplicate-version findings are warnings only.
+- `cargo package -p rvl` succeeds only after the matching `redis-vl` version is
+  available in the crates.io index.

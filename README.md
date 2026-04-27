@@ -269,6 +269,20 @@ REDISVL_RUN_INTEGRATION=1 cargo test --workspace
 Redis 8.4+ hybrid/aggregate/multi-vector tests additionally require a Redis 8.4
 server.
 
+## Release Flow
+
+Normal pull requests and pushes run verification only. Publishing is triggered
+by pushing a version tag that matches `Cargo.toml`:
+
+```bash
+git tag v0.1.1
+git push origin v0.1.1
+```
+
+The tag workflow publishes `redis-vl`, waits for crates.io indexing, publishes
+`rvl`, creates the GitHub Release, and then builds cross-platform `rvl` binaries
+for the release. See [PUBLISHING.md](PUBLISHING.md) for the maintainer runbook.
+
 ## Documentation
 
 - **[API Reference (docs.rs)](https://docs.rs/redis-vl)** – auto-generated Rustdoc
