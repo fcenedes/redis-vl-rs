@@ -53,9 +53,12 @@ they do not need extra repository secrets.
    cargo publish -p rvl
    ```
 
-6. Create a GitHub Release or tag. The `release-binaries.yml` workflow builds
-   `rvl` artifacts for Linux, macOS, and Windows and attaches them to the
-   release.
+6. Create the GitHub Release and binaries from CI:
+
+   - Go to Actions -> Release Binaries -> Run workflow.
+   - Enter a tag such as `v0.1.1`.
+   - The workflow creates the tag/release if needed, builds `rvl` on Linux,
+     macOS, and Windows, and attaches the binaries to the GitHub Release.
 
 ## Automated Publishing
 
@@ -69,6 +72,19 @@ Use the manual `Publish` workflow in GitHub Actions:
 `release-plz.yml` currently creates release PRs. Actual crate publication stays
 manual through `publish.yml` so the first release can respect the workspace
 publish order.
+
+## GitHub Release Binaries
+
+Use the `Release Binaries` workflow to create or update a GitHub Release:
+
+1. Open Actions -> Release Binaries.
+2. Run the workflow from `main`.
+3. Set `tag` to the version tag, for example `v0.1.1`.
+4. Leave `prerelease` unchecked for a normal release.
+
+The workflow checks out the tag, builds `cargo build -p rvl --release --locked`
+on Linux, macOS, and Windows, uploads workflow artifacts, and attaches the
+artifacts to the GitHub Release.
 
 ## Trusted Publishing
 

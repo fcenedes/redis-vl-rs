@@ -18,7 +18,7 @@ anstream.workspace = true
 anyhow = "1.0.102"
 clap.workspace = true
 comfy-table.workspace = true
-redis-vl = { version = "0.1.0", path = "../redis-vl" }
+redis-vl = { version = "0.1.1", path = "../redis-vl" }
 serde_json.workspace = true
 
 [lints]

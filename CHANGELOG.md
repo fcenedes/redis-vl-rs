@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## 0.1.1
+
+### Fixed
+
+- Correct crate metadata to point at `https://github.com/fcenedes/redis-vl-rs`.
+
+### Changed
+
+- Add CI-driven GitHub Release creation and cross-platform `rvl` binary upload.
+
+## 0.1.0
+
 ### Added
 
 - Core library: schema, filter, query, index, vectorizers, and extensions

@@ -5,11 +5,11 @@ resolver = "2"
 [workspace.package]
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/redis/redis-vl-rs"
-homepage = "https://github.com/redis/redis-vl-rs"
+repository = "https://github.com/fcenedes/redis-vl-rs"
+homepage = "https://github.com/fcenedes/redis-vl-rs"
 documentation = "https://docs.rs/redis-vl"
 rust-version = "1.85"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["RedisVL Rust Contributors"]
 
 [workspace.dependencies]
