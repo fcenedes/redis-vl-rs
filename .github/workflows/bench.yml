@@ -23,7 +23,7 @@ jobs:
       - name: Run core benches
         run: cargo bench -p redis-vl --bench core_benchmarks
       - name: Upload Criterion reports
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: criterion-core
           path: target/criterion/
@@ -60,7 +60,7 @@ jobs:
           REDIS_URL: redis://localhost:6379
         run: benches/compare.sh --redis --verbose
       - name: Upload comparison results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bench-comparison
           path: target/bench-compare/
