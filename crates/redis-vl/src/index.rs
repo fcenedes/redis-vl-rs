@@ -367,6 +367,7 @@ impl SearchIndex {
         F: FnMut(&Value) -> Result<Value>,
     {
         let prepared = prepare_load_records(data, &mut preprocess)?;
+        validate_load_ids(&prepared, id_field)?;
         let client = self.connection.client()?;
         let mut connection = client.get_connection()?;
         let mut written_keys = Vec::with_capacity(prepared.len());
@@ -1121,6 +1122,7 @@ impl AsyncSearchIndex {
         F: FnMut(&Value) -> Result<Value>,
     {
         let prepared = prepare_load_records(data, &mut preprocess)?;
+        validate_load_ids(&prepared, id_field)?;
         let client = self.connection.client()?;
         let mut connection = client.get_multiplexed_async_connection().await?;
         let mut written_keys = Vec::with_capacity(prepared.len());
@@ -1618,6 +1620,16 @@ fn extract_id<'a>(object: &'a Map<String, Value>, id_field: &str) -> Result<&'a 
         .get(id_field)
         .and_then(Value::as_str)
         .ok_or_else(|| Error::InvalidInput(format!("missing string id field '{id_field}'")))
+}
+
+fn validate_load_ids(records: &[Value], id_field: &str) -> Result<()> {
+    for record in records {
+        let object = record
+            .as_object()
+            .ok_or_else(|| Error::InvalidInput("load expects JSON object records".to_owned()))?;
+        extract_id(object, id_field)?;
+    }
+    Ok(())
 }
 
 fn compose_key(prefix: &str, key_separator: &str, key_suffix: &str) -> String {

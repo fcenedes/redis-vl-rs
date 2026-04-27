@@ -946,7 +946,7 @@ mod tests {
     #[test]
     fn schema_from_yaml_should_parse_json_storage() {
         let schema = IndexSchema::from_yaml_str(
-            r#"
+            r"
 index:
   name: docs
   prefix: doc
@@ -963,7 +963,7 @@ fields:
       dims: 3
       datatype: FLOAT32
       distance_metric: COSINE
-"#,
+",
         )
         .expect("schema should parse");
 
@@ -1019,7 +1019,7 @@ fields:
     #[test]
     fn schema_multi_prefix_yaml_should_parse() {
         let schema = IndexSchema::from_yaml_str(
-            r#"
+            r"
 index:
   name: multi
   prefix:
@@ -1028,7 +1028,7 @@ index:
 fields:
   - name: tag
     type: tag
-"#,
+",
         )
         .expect("schema should parse");
 
@@ -1084,13 +1084,13 @@ fields:
     #[test]
     fn fields_default_to_no_index_missing_or_empty() {
         let schema = IndexSchema::from_yaml_str(
-            r#"
+            r"
 index:
   name: test_defaults
 fields:
   - name: brand
     type: tag
-"#,
+",
         )
         .expect("schema should parse");
 
@@ -1233,7 +1233,7 @@ fields:
     fn schema_from_yaml_bfloat16_vector() {
         use super::{FieldKind, VectorDataType};
         let schema = IndexSchema::from_yaml_str(
-            r#"
+            r"
 index:
   name: bf16test
   prefix: bf16
@@ -1245,7 +1245,7 @@ fields:
       dims: 4
       datatype: BFLOAT16
       distance_metric: COSINE
-"#,
+",
         )
         .expect("schema with BFLOAT16 should parse");
 
@@ -1262,7 +1262,7 @@ fields:
     fn schema_from_yaml_float16_vector() {
         use super::{FieldKind, VectorDataType};
         let schema = IndexSchema::from_yaml_str(
-            r#"
+            r"
 index:
   name: f16test
   prefix: f16
@@ -1274,7 +1274,7 @@ fields:
       dims: 8
       datatype: FLOAT16
       distance_metric: L2
-"#,
+",
         )
         .expect("schema with FLOAT16 should parse");
 

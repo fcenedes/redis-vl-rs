@@ -19,7 +19,7 @@ for detailed coverage against the Python surface.
 | `index` | Sync and async search index lifecycle, hybrid search, aggregate queries, multi-vector queries |
 | `filter` | Composable filter DSL (Tag, Text, Num, Geo, Timestamp) |
 | `query` | Vector, range, text, filter, count, hybrid, aggregate hybrid, multi-vector, and SQL queries |
-| `vectorizers` | OpenAI, LiteLLM, Custom, Azure OpenAI, Cohere, VoyageAI, Mistral, Anthropic, and HuggingFace local vectorizers |
+| `vectorizers` | OpenAI, LiteLLM, Custom, Azure OpenAI, Cohere, VoyageAI, Mistral, Vertex AI, Bedrock, Anthropic, and HuggingFace local vectorizers |
 | `rerankers` | Reranker traits and Cohere reranker |
 | `extensions` | Embeddings cache, semantic cache, message history, semantic message history, semantic router |
 
@@ -34,4 +34,3 @@ for detailed coverage against the Python surface.
 - [GitHub Repository](https://github.com/redis/redis-vl-rs)
 - [Parity Matrix](https://github.com/redis/redis-vl-rs/blob/main/PARITY_MATRIX.md)
 - [docs.rs](https://docs.rs/redis-vl)
-

@@ -1586,8 +1586,8 @@ mod tests {
             .unwrap();
         assert_eq!(vec_field["attrs"]["datatype"], "float64");
 
-        let schema_bf16 = semantic_cache_schema("test", 128, VectorDataType::Bfloat16, &[]);
-        let vec_field = schema_bf16["fields"]
+        let schema_bfloat16 = semantic_cache_schema("test", 128, VectorDataType::Bfloat16, &[]);
+        let vec_field = schema_bfloat16["fields"]
             .as_array()
             .unwrap()
             .iter()
@@ -1595,8 +1595,8 @@ mod tests {
             .unwrap();
         assert_eq!(vec_field["attrs"]["datatype"], "bfloat16");
 
-        let schema_f16 = semantic_cache_schema("test", 128, VectorDataType::Float16, &[]);
-        let vec_field = schema_f16["fields"]
+        let schema_float16 = semantic_cache_schema("test", 128, VectorDataType::Float16, &[]);
+        let vec_field = schema_float16["fields"]
             .as_array()
             .unwrap()
             .iter()

@@ -1593,15 +1593,15 @@ fn parse_single_condition(tokens: &[String], mut pos: usize) -> Option<(String, 
                 format!("(-@{}:[{} {}])", field, format_num(n), format_num(n)),
                 pos,
             ));
-        } else if let Some(ts) = try_parse_date(&value) {
+        }
+        if let Some(ts) = try_parse_date(&value) {
             return Some((
                 format!("(-@{}:[{} {}])", field, format_num(ts), format_num(ts)),
                 pos,
             ));
-        } else {
-            // Tag or text negation.
-            return Some((format!("(-@{}:{{{}}})", field, escape_tag(&value)), pos));
         }
+        // Tag or text negation.
+        return Some((format!("(-@{}:{{{}}})", field, escape_tag(&value)), pos));
     }
 
     // Comparison operators: =, <, >, <=, >=
@@ -2480,9 +2480,9 @@ mod tests {
         // 1970-01-01 → 0
         assert_eq!(try_parse_date("1970-01-01"), Some(0.0));
         // 2000-01-01 → 946684800
-        assert_eq!(try_parse_date("2000-01-01"), Some(946684800.0));
+        assert_eq!(try_parse_date("2000-01-01"), Some(946_684_800.0));
         // 2024-01-01 → 1704067200
-        assert_eq!(try_parse_date("2024-01-01"), Some(1704067200.0));
+        assert_eq!(try_parse_date("2024-01-01"), Some(1_704_067_200.0));
     }
 
     #[test]

@@ -35,10 +35,12 @@
 //! - `openai` *(default)* – OpenAI-compatible vectorizer
 //! - `litellm` *(default)* – LiteLLM vectorizer
 //! - `azure-openai` – Azure OpenAI vectorizer
+//! - `bedrock` – AWS Bedrock vectorizer
 //! - `cohere` – Cohere vectorizer and reranker support
 //! - `voyageai` – VoyageAI vectorizer
 //! - `mistral` – Mistral vectorizer
 //! - `anthropic` – Anthropic adapter (Voyage AI-backed)
+//! - `vertex-ai` – Google Vertex AI vectorizer
 //! - `hf-local` – HuggingFace local ONNX embedding via `fastembed`
 //! - `sql` – SQL query support (`SQLQuery`)
 //! - `rerankers` – Reranker support (`CohereReranker`)
@@ -141,9 +143,13 @@ pub use vectorizers::{
 };
 #[cfg(feature = "azure-openai")]
 pub use vectorizers::{AzureOpenAIConfig, AzureOpenAITextVectorizer};
+#[cfg(feature = "bedrock")]
+pub use vectorizers::{BedrockConfig, BedrockTextVectorizer};
 #[cfg(feature = "cohere")]
 pub use vectorizers::{CohereConfig, CohereTextVectorizer};
 #[cfg(feature = "mistral")]
 pub use vectorizers::{MistralAITextVectorizer, MistralConfig};
+#[cfg(feature = "vertex-ai")]
+pub use vectorizers::{VertexAIConfig, VertexAITextVectorizer};
 #[cfg(feature = "voyageai")]
 pub use vectorizers::{VoyageAIConfig, VoyageAITextVectorizer};

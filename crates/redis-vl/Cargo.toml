@@ -15,6 +15,8 @@ categories = ["database", "api-bindings"]
 
 [dependencies]
 async-trait.workspace = true
+aws-config = { workspace = true, optional = true }
+aws-sdk-bedrockruntime = { workspace = true, optional = true }
 base64.workspace = true
 bytes.workspace = true
 chrono.workspace = true
@@ -41,7 +43,7 @@ vertex-ai = []
 anthropic = ["voyageai"]
 voyageai = []
 mistral = []
-bedrock = []
+bedrock = ["dep:aws-config", "dep:aws-sdk-bedrockruntime"]
 hf-local = ["dep:fastembed"]
 sql = []
 rerankers = []

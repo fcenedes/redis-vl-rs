@@ -147,9 +147,7 @@ impl BedrockTextVectorizer {
         let mut aws_config_loader =
             aws_config::from_env().region(aws_config::Region::new(config.region.clone()));
 
-        if let (Some(ref key_id), Some(ref secret)) =
-            (&config.access_key_id, &config.secret_access_key)
-        {
+        if let (Some(key_id), Some(secret)) = (&config.access_key_id, &config.secret_access_key) {
             aws_config_loader = aws_config_loader.credentials_provider(
                 aws_sdk_bedrockruntime::config::Credentials::new(
                     key_id.clone(),

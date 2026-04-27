@@ -17,6 +17,11 @@ mod azure_openai;
 #[cfg(feature = "azure-openai")]
 pub use azure_openai::{AzureOpenAIConfig, AzureOpenAITextVectorizer};
 
+#[cfg(feature = "bedrock")]
+mod bedrock;
+#[cfg(feature = "bedrock")]
+pub use self::bedrock::{BedrockConfig, BedrockTextVectorizer};
+
 #[cfg(feature = "cohere")]
 mod cohere;
 #[cfg(feature = "cohere")]
@@ -36,6 +41,11 @@ pub use self::mistral::{MistralAITextVectorizer, MistralConfig};
 mod voyageai;
 #[cfg(feature = "voyageai")]
 pub use self::voyageai::{VoyageAIConfig, VoyageAITextVectorizer};
+
+#[cfg(feature = "vertex-ai")]
+mod vertex_ai;
+#[cfg(feature = "vertex-ai")]
+pub use self::vertex_ai::{VertexAIConfig, VertexAITextVectorizer};
 
 /// Shared embedding request payload.
 #[derive(Debug, Clone, Serialize)]

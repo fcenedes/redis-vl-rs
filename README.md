@@ -29,8 +29,8 @@ of [Redis](https://redis.io/).
   (`geo_distance()` in WHERE and SELECT clauses).
 - **Vectorizers** – `OpenAITextVectorizer`, `LiteLLMTextVectorizer`,
   `CustomTextVectorizer`, `AzureOpenAITextVectorizer`, `CohereTextVectorizer`,
-  `VoyageAITextVectorizer`, `MistralAITextVectorizer`,
-  `AnthropicTextVectorizer` (Voyage AI-backed), and
+  `VoyageAITextVectorizer`, `MistralAITextVectorizer`, `VertexAITextVectorizer`,
+  `BedrockTextVectorizer`, `AnthropicTextVectorizer` (Voyage AI-backed), and
   `HuggingFaceTextVectorizer` (local ONNX via `fastembed`).
 - **Rerankers** – `CohereReranker` behind the `rerankers` feature flag with
   sync and async support.
@@ -43,7 +43,6 @@ of [Redis](https://redis.io/).
 
 ### Not yet implemented
 
-- Vertex AI and Bedrock vectorizer providers (source exists, not yet wired)
 - SQL date functions (`YEAR()`), `IS NULL`/`IS NOT NULL`, `HAVING`
 - Richer CLI command/flag parity (`load`, query commands)
 
@@ -213,15 +212,12 @@ Set `REDIS_URL` or pass `--redis-url` to override the default
 | `cohere` | | Cohere vectorizer |
 | `voyageai` | | VoyageAI vectorizer |
 | `mistral` | | Mistral vectorizer |
+| `vertex-ai` | | Google Vertex AI vectorizer |
+| `bedrock` | | AWS Bedrock vectorizer |
 | `anthropic` | | Anthropic adapter (Voyage AI-backed; requires `voyageai`) |
 | `hf-local` | | HuggingFace local ONNX embedding via `fastembed` |
 | `sql` | | SQL query support (`SQLQuery`) |
 | `rerankers` | | Reranker support (`CohereReranker`) |
-| `vertex-ai` | | Vertex AI adapter *(source exists, not yet wired)* |
-| `bedrock` | | AWS Bedrock adapter *(source exists, not yet wired)* |
-
-Flags marked *(not yet wired)* have source code but are not yet registered in
-the module tree or dependency graph.
 
 ## Examples
 

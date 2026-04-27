@@ -1384,18 +1384,18 @@ mod tests {
             .unwrap();
         assert_eq!(vector_field["attrs"]["datatype"], "float64");
 
-        let schema_bf16 =
+        let schema_bfloat16 =
             semantic_message_history_schema("test_history", 128, VectorDataType::Bfloat16);
-        let fields = schema_bf16["fields"].as_array().unwrap();
+        let fields = schema_bfloat16["fields"].as_array().unwrap();
         let vector_field = fields
             .iter()
             .find(|f| f["name"].as_str() == Some("message_vector"))
             .unwrap();
         assert_eq!(vector_field["attrs"]["datatype"], "bfloat16");
 
-        let schema_f16 =
+        let schema_float16 =
             semantic_message_history_schema("test_history", 128, VectorDataType::Float16);
-        let fields = schema_f16["fields"].as_array().unwrap();
+        let fields = schema_float16["fields"].as_array().unwrap();
         let vector_field = fields
             .iter()
             .find(|f| f["name"].as_str() == Some("message_vector"))

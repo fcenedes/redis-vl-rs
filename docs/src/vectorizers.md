@@ -15,15 +15,10 @@ and `AsyncVectorizer` trait (async) with several provider implementations.
 | Cohere | `cohere` | `CohereTextVectorizer` | Cohere embed API |
 | VoyageAI | `voyageai` | `VoyageAITextVectorizer` | VoyageAI embeddings API |
 | Mistral | `mistral` | `MistralAITextVectorizer` | Mistral embeddings API |
+| Vertex AI | `vertex-ai` | `VertexAITextVectorizer` | Google Vertex AI predict API |
+| AWS Bedrock | `bedrock` | `BedrockTextVectorizer` | Amazon Bedrock Runtime `InvokeModel` API |
 | Anthropic | `anthropic` | `AnthropicTextVectorizer` | Voyage AI-backed adapter (Anthropic recommends Voyage AI for embeddings) |
 | HuggingFace local | `hf-local` | `HuggingFaceTextVectorizer` | Local ONNX embedding via `fastembed` — no external API required |
-
-### Not yet wired (source exists)
-
-| Provider | Feature flag | Status |
-| --- | --- | --- |
-| Vertex AI | `vertex-ai` | Source file exists; not yet registered in module tree |
-| AWS Bedrock | `bedrock` | Source file exists; not yet registered in module tree or dependencies |
 
 ## The Vectorizer trait
 

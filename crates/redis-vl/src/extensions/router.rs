@@ -233,7 +233,7 @@ impl SemanticRouter {
 
         index.create_with_options(overwrite, false)?;
 
-        let router = Self {
+        let semantic_router = Self {
             name,
             connection,
             routes,
@@ -245,10 +245,10 @@ impl SemanticRouter {
         };
 
         if !existed || overwrite {
-            router.load_routes()?;
+            semantic_router.load_routes()?;
         }
-        router.persist_config()?;
-        Ok(router)
+        semantic_router.persist_config()?;
+        Ok(semantic_router)
     }
 
     /// Reconnects to an existing semantic router stored in Redis.
@@ -1280,16 +1280,16 @@ mod tests {
             .unwrap();
         assert_eq!(vector_field["attrs"]["datatype"], "float64");
 
-        let schema_bf16 = router_schema("my_router", 64, VectorDataType::Bfloat16);
-        let fields = schema_bf16["fields"].as_array().unwrap();
+        let schema_bfloat16 = router_schema("my_router", 64, VectorDataType::Bfloat16);
+        let fields = schema_bfloat16["fields"].as_array().unwrap();
         let vector_field = fields
             .iter()
             .find(|f| f["name"].as_str() == Some("vector"))
             .unwrap();
         assert_eq!(vector_field["attrs"]["datatype"], "bfloat16");
 
-        let schema_f16 = router_schema("my_router", 64, VectorDataType::Float16);
-        let fields = schema_f16["fields"].as_array().unwrap();
+        let schema_float16 = router_schema("my_router", 64, VectorDataType::Float16);
+        let fields = schema_float16["fields"].as_array().unwrap();
         let vector_field = fields
             .iter()
             .find(|f| f["name"].as_str() == Some("vector"))
