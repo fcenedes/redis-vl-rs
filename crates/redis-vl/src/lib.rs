@@ -1,10 +1,5 @@
 #![deny(missing_docs)]
 #![cfg_attr(docsrs, feature(doc_auto_cfg))]
-// The README (included below) contains `[LICENSE](LICENSE)` which rustdoc
-// cannot resolve as an intra-doc link. This is expected — the link works on
-// GitHub where the README is primarily consumed.
-#![doc = include_str!("../../../README.md")]
-
 //! # redis-vl
 //!
 //! Async-first Rust implementation of the [Redis Vector Library](https://github.com/redis/redis-vl-python).

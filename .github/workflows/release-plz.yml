@@ -9,6 +9,7 @@ permissions:
   contents: write
   pull-requests: write
   packages: write
+  id-token: write
 
 jobs:
   release-plz:
@@ -25,3 +26,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
+      # Publishing is handled by publish.yml so the first release can publish
+      # redis-vl before rvl, and so maintainers can switch from token auth to
+      # crates.io Trusted Publishing after the initial manual release.

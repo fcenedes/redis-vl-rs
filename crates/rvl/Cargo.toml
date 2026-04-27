@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
-documentation.workspace = true
+documentation = "https://docs.rs/rvl"
 rust-version.workspace = true
 authors.workspace = true
 description = "CLI for the Rust Redis Vector Library"
@@ -18,7 +18,7 @@ anstream.workspace = true
 anyhow = "1.0.102"
 clap.workspace = true
 comfy-table.workspace = true
-redis-vl = { path = "../redis-vl" }
+redis-vl = { version = "0.1.0", path = "../redis-vl" }
 serde_json.workspace = true
 
 [lints]

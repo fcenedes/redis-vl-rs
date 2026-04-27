@@ -31,6 +31,8 @@ jobs:
 
       - name: Build API docs (cargo doc)
         run: cargo doc --workspace --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: "-D warnings"
 
       # Merge: mdBook output is the site root, cargo doc output goes under /api
       - name: Merge mdBook and API docs

@@ -15,8 +15,8 @@ authors = ["RedisVL Rust Contributors"]
 [workspace.dependencies]
 anstream = "1.0.0"
 async-trait = "0.1"
-aws-config = { version = "1", features = ["behavior-version-latest"] }
-aws-sdk-bedrockruntime = "1"
+aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "credentials-process", "default-https-client", "rt-tokio"] }
+aws-sdk-bedrockruntime = { version = "1", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio"] }
 base64 = "0.22"
 bytes = "1"
 chrono = { version = "0.4", features = ["serde"] }

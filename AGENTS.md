@@ -65,12 +65,25 @@ Useful local reference during this work:
 
 Latest verified commands:
 
-- `cargo fmt --all`
-- `cargo check --workspace`
-- `cargo test --workspace`
+- `cargo fmt --all --check`
 - `cargo check --workspace --all-features`
+- `cargo test --workspace --all-features`
+- `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps`
+- `mdbook build docs`
+- `cargo audit`
+- `cargo deny check`
+- `cargo package -p redis-vl --allow-dirty`
 - `cargo test -p redis-vl --features vertex-ai`
 - `cargo test -p redis-vl --features bedrock`
+
+Security and release readiness notes:
+
+- `cargo audit` has no vulnerability findings as of 2026-04-27. It reports one allowed unmaintained warning from optional `hf-local` dependencies: `paste` via `fastembed`/`tokenizers`.
+- `cargo deny check` passes. Duplicate-version findings are warnings only.
+- `cargo package -p redis-vl` verifies successfully from the generated crate tarball.
+- `cargo package -p rvl` should be run only after `redis-vl` is published and visible in the crates.io index, because Cargo strips the local path dependency and resolves `redis-vl = "0.1.0"` from crates.io.
+- `PUBLISHING.md` documents the release process and required GitHub secret (`CARGO_REGISTRY_TOKEN`).
+- GitHub automation now includes CI, docs deployment, security checks, release PRs, manual crates.io publishing, cross-platform `rvl` release artifacts, and Dependabot.
 
 Current passing Rust test inventory:
 
@@ -98,7 +111,7 @@ Integration test execution notes:
 
 Verification caveat:
 
-- `cargo clippy --workspace --all-targets --all-features -- -D warnings` is not currently green. It fails on broad pre-existing lint debt from strict workspace lints (`missing_errors_doc`, `doc_markdown`, `must_use_candidate`, `multiple_crate_versions`, and similar pedantic/cargo lints), not on provider wiring or parity test failures. Treat this as a repo-quality follow-up before making clippy a required gate.
+- `cargo clippy --workspace --all-targets --all-features` is green, but `cargo clippy --workspace --all-targets --all-features -- -D warnings` is not currently green. It fails on broad pre-existing lint debt from strict workspace lints (`missing_errors_doc`, `doc_markdown`, `must_use_candidate`, `multiple_crate_versions`, and similar pedantic/cargo lints), not on provider wiring or parity test failures. CI runs strict clippy as a non-blocking debt tracker until this is paid down.
 
 ## Repo Map For Handoff
 

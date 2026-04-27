@@ -4,6 +4,7 @@ on:
   push:
     branches: ["main"]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   checks:
@@ -14,7 +15,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Format
         run: cargo fmt --all --check
+      - name: Check default features
+        run: cargo check --workspace
+      - name: Check all features
+        run: cargo check --workspace --all-features
       - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features
+      - name: Strict clippy debt tracker
+        continue-on-error: true
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - name: Test
         run: cargo test --workspace --all-features
@@ -22,4 +30,8 @@ jobs:
         run: cargo doc --workspace --all-features --no-deps
         env:
           RUSTDOCFLAGS: "-D warnings"
-
+      - name: Package redis-vl
+        run: cargo package -p redis-vl
+      - name: Package rvl after redis-vl is published
+        if: ${{ false }}
+        run: cargo package -p rvl

@@ -255,8 +255,8 @@ See [`benches/README.md`](benches/README.md) for the full benchmark inventory.
 
 ```bash
 cargo fmt --all
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace
+cargo clippy --workspace --all-targets --all-features
+cargo test --workspace --all-features
 ```
 
 Integration tests require a running Redis instance with the Search module
@@ -274,7 +274,8 @@ server.
 - **[API Reference (docs.rs)](https://docs.rs/redis-vl)** – auto-generated Rustdoc
 - **[User Guide (mdBook)](docs/)** – getting started, schema, queries, extensions, CLI
 - **[Parity Matrix](PARITY_MATRIX.md)** – feature-level tracking against Python RedisVL
+- **[Publishing Guide](PUBLISHING.md)** – crates.io, docs, and release workflow notes
 
 ## License
 
-MIT – see the [LICENSE](LICENSE) file for details.
+MIT - see the LICENSE file for details.

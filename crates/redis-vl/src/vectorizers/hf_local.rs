@@ -7,7 +7,7 @@
 //! # Example
 //!
 //! ```rust,no_run
-//! use redis_vl::vectorizers::HuggingFaceTextVectorizer;
+//! use redis_vl::vectorizers::{HuggingFaceTextVectorizer, Vectorizer};
 //!
 //! // Uses the default model (AllMiniLML6V2)
 //! let vectorizer = HuggingFaceTextVectorizer::new(Default::default()).unwrap();
