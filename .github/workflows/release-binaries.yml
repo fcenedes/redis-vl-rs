@@ -47,7 +47,7 @@ jobs:
             artifact: rvl-windows-x86_64.exe
             binary: target/release/rvl.exe
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
         with:
           ref: ${{ needs.release.outputs.tag }}
       - uses: dtolnay/rust-toolchain@stable
