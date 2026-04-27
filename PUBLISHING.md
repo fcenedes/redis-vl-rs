@@ -102,14 +102,15 @@ The `Publish` workflow runs on `v*` tags and does the release:
 2. Runs formatting, checks, tests, docs, audit, deny, and packaging.
 3. Runs `cargo publish -p redis-vl --dry-run`.
 4. Publishes `redis-vl`.
-5. Waits for `redis-vl` to appear in the crates.io index.
-6. Runs `cargo publish -p rvl --dry-run`.
-7. Publishes `rvl`.
-8. Creates the GitHub Release.
+5. Waits until `cargo publish -p rvl --dry-run` can resolve the newly published
+   `redis-vl` version from crates.io.
+6. Publishes `rvl`.
+7. Creates the GitHub Release.
 
 The workflow is idempotent for partial releases: if `redis-vl` or `rvl` at the
 target version is already visible on crates.io, the matching publish step is
-skipped. The crates.io indexing wait allows up to 30 minutes before failing.
+skipped. The crates.io dependency-resolution wait allows up to 30 minutes before
+failing.
 
 When the GitHub Release is published, the `Release Binaries` workflow runs and
 attaches the cross-platform `rvl` binaries.
