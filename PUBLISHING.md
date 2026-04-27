@@ -7,8 +7,8 @@ This repository uses a tag-driven release flow.
   release binaries.
 
 The release source of truth is the workspace version in `Cargo.toml`. A release
-tag must match that version exactly, for example `version = "0.1.1"` must be
-released with tag `v0.1.1`.
+tag must match that version exactly, for example `version = "0.1.2"` must be
+released with tag `v0.1.2`.
 
 ## What Gets Published
 
@@ -92,8 +92,8 @@ a known lint-debt follow-up. CI tracks it as non-blocking.
 5. Create and push the matching version tag:
 
    ```bash
-   git tag v0.1.1
-   git push origin v0.1.1
+   git tag v0.1.2
+   git push origin v0.1.2
    ```
 
 The `Publish` workflow runs on `v*` tags and does the release:
@@ -128,7 +128,7 @@ If a GitHub Release already exists and you only need to rebuild/upload binaries:
 
 1. Open Actions -> Release Binaries.
 2. Run the workflow from `main`.
-3. Set `tag` to an existing release tag, for example `v0.1.1`.
+3. Set `tag` to an existing release tag, for example `v0.1.2`.
 
 The workflow checks out that tag, builds `cargo build -p rvl --release --locked`
 on Linux, macOS, and Windows, uploads workflow artifacts, and attaches them to

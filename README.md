@@ -4,7 +4,7 @@ Rust implementation of the [Redis Vector Library](https://github.com/redis/redis
 providing vector search, semantic caching, message history, and routing on top
 of [Redis](https://redis.io/).
 
-> **Status**: pre-release (`0.1.1`). The library is functional for core
+> **Status**: pre-release (`0.1.2`). The library is functional for core
 > workflows but has not yet reached full parity with the Python `redisvl`
 > package. See the [Parity Matrix](PARITY_MATRIX.md) for current coverage.
 
@@ -275,8 +275,8 @@ Normal pull requests and pushes run verification only. Publishing is triggered
 by pushing a version tag that matches `Cargo.toml`:
 
 ```bash
-git tag v0.1.1
-git push origin v0.1.1
+git tag v0.1.2
+git push origin v0.1.2
 ```
 
 The tag workflow publishes `redis-vl`, waits for crates.io indexing, publishes

@@ -1,5 +1,4 @@
 #![deny(missing_docs)]
-#![cfg_attr(docsrs, feature(doc_auto_cfg))]
 //! # redis-vl
 //!
 //! Async-first Rust implementation of the [Redis Vector Library](https://github.com/redis/redis-vl-python).

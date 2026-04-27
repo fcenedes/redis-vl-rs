@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+## 0.1.2
+
+### Fixed
+
+- Fix docs.rs rustdoc generation by removing the removed `doc_auto_cfg` feature
+  gate.
+
 ## 0.1.1
 
 ### Fixed
