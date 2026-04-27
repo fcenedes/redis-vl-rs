@@ -6,18 +6,9 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to create/use, for example v0.1.1"
+        description: "Existing release tag to rebuild/upload binaries for, for example v0.1.1"
         required: true
         type: string
-      title:
-        description: "Release title"
-        required: false
-        type: string
-      prerelease:
-        description: "Mark the GitHub Release as a prerelease"
-        required: true
-        default: false
-        type: boolean
 
 permissions:
   contents: write
@@ -37,46 +28,6 @@ jobs:
           else
             echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
           fi
-
-      - uses: actions/checkout@v4
-        if: github.event_name == 'workflow_dispatch'
-        with:
-          fetch-depth: 0
-
-      - name: Create tag if needed
-        if: github.event_name == 'workflow_dispatch'
-        shell: bash
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git fetch --tags
-          if ! git rev-parse "${{ inputs.tag }}" >/dev/null 2>&1; then
-            git tag "${{ inputs.tag }}"
-            git push origin "${{ inputs.tag }}"
-          fi
-
-      - name: Create GitHub Release if needed
-        if: github.event_name == 'workflow_dispatch'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_TITLE: ${{ inputs.title }}
-        shell: bash
-        run: |
-          if gh release view "${{ inputs.tag }}" >/dev/null 2>&1; then
-            exit 0
-          fi
-
-          args=(gh release create "${{ inputs.tag }}")
-          if [ -n "$RELEASE_TITLE" ]; then
-            args+=(--title "$RELEASE_TITLE")
-          else
-            args+=(--title "${{ inputs.tag }}")
-          fi
-          args+=(--generate-notes)
-          if [ "${{ inputs.prerelease }}" = "true" ]; then
-            args+=(--prerelease)
-          fi
-          "${args[@]}"
 
   build-rvl:
     name: Build rvl (${{ matrix.os }})

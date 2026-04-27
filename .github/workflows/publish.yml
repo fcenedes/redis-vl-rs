@@ -1,28 +1,66 @@
 name: Publish
 
 on:
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
-    inputs:
-      package:
-        description: "Package to publish"
-        required: true
-        default: "redis-vl"
-        type: choice
-        options:
-          - redis-vl
-          - rvl
-      dry_run:
-        description: "Run cargo publish --dry-run instead of publishing"
-        required: true
-        default: true
-        type: boolean
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 jobs:
+  verify:
+    name: Verify release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install security tools
+        run: |
+          cargo install cargo-audit --locked
+          cargo install cargo-deny --locked
+
+      - name: Check release tag matches Cargo version
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "redis-vl") | .version')"
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$version" != "$tag" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match Cargo version $version"
+            exit 1
+          fi
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Check all features
+        run: cargo check --workspace --all-features
+
+      - name: Test all features
+        run: cargo test --workspace --all-features
+
+      - name: Build docs
+        run: cargo doc --workspace --all-features --no-deps
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+      - name: Security audit
+        run: cargo audit
+
+      - name: License and advisory policy
+        run: cargo deny check
+
+      - name: Package redis-vl
+        run: cargo package -p redis-vl
+
   publish:
+    name: Publish crates
+    needs: verify
     runs-on: ubuntu-latest
     environment: crates-io
     steps:
@@ -30,13 +68,61 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      - name: Verify package
-        run: cargo publish -p "${{ inputs.package }}" --dry-run
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "redis-vl") | .version')"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+
+      - name: Dry-run redis-vl publish
+        run: cargo publish -p redis-vl --dry-run
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
-      - name: Publish package
-        if: ${{ !inputs.dry_run }}
-        run: cargo publish -p "${{ inputs.package }}"
+      - name: Publish redis-vl
+        if: github.event_name == 'push'
+        run: cargo publish -p redis-vl
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Wait for redis-vl to reach crates.io index
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          for attempt in {1..30}; do
+            if cargo search redis-vl --limit 1 | grep -q '^redis-vl = "${{ steps.version.outputs.version }}"'; then
+              exit 0
+            fi
+            echo "redis-vl ${{ steps.version.outputs.version }} not indexed yet; waiting..."
+            sleep 10
+          done
+
+          echo "redis-vl ${{ steps.version.outputs.version }} did not appear in crates.io index in time"
+          exit 1
+
+      - name: Dry-run rvl publish
+        if: github.event_name == 'push'
+        run: cargo publish -p rvl --dry-run
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Publish rvl
+        if: github.event_name == 'push'
+        run: cargo publish -p rvl
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Create GitHub Release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          if gh release view "${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
+            exit 0
+          fi
+          gh release create "${{ steps.version.outputs.tag }}" \
+            --title "${{ steps.version.outputs.tag }}" \
+            --generate-notes

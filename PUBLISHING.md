@@ -53,34 +53,53 @@ they do not need extra repository secrets.
    cargo publish -p rvl
    ```
 
-6. Create the GitHub Release and binaries from CI:
+6. Create the release tag locally and push it:
 
-   - Go to Actions -> Release Binaries -> Run workflow.
-   - Enter a tag such as `v0.1.1`.
-   - The workflow creates the tag/release if needed, builds `rvl` on Linux,
-     macOS, and Windows, and attaches the binaries to the GitHub Release.
+   ```bash
+   git tag v0.1.1
+   git push origin v0.1.1
+   ```
+
+   Pushing a `v*` tag runs the `Publish` workflow. That workflow verifies the
+   workspace, publishes `redis-vl`, waits for crates.io indexing, publishes
+   `rvl`, and creates the GitHub Release.
+
+7. The `Release Binaries` workflow runs when the GitHub Release is published:
+
+   - It builds `rvl` on Linux, macOS, and Windows.
+   - It attaches the binaries to the GitHub Release.
 
 ## Automated Publishing
 
-Use the manual `Publish` workflow in GitHub Actions:
+Publishing is tag-driven:
 
-- Select `redis-vl` first.
-- Leave `dry_run` enabled for a verification pass.
-- Re-run with `dry_run` disabled to publish.
-- After crates.io indexes `redis-vl`, repeat for `rvl`.
+```bash
+git tag v0.1.1
+git push origin v0.1.1
+```
 
-`release-plz.yml` currently creates release PRs. Actual crate publication stays
-manual through `publish.yml` so the first release can respect the workspace
-publish order.
+Use the manual `Publish` workflow in GitHub Actions only for dry-runs:
+
+- It verifies the workspace.
+- It runs `cargo publish -p redis-vl --dry-run`.
+- The `rvl` dry-run runs only on tag releases, after `redis-vl` has been
+  published and indexed.
+
+`release-plz.yml` currently creates release PRs. Actual crate publication is
+driven by pushing version tags so normal PRs and pushes only run verification.
 
 ## GitHub Release Binaries
 
-Use the `Release Binaries` workflow to create or update a GitHub Release:
+The `Publish` workflow creates the GitHub Release automatically after both
+crates publish successfully. The `Release Binaries` workflow then runs from the
+GitHub `release.published` event.
+
+Use the `Release Binaries` workflow manually only when rebuilding binaries for
+an existing release:
 
 1. Open Actions -> Release Binaries.
 2. Run the workflow from `main`.
-3. Set `tag` to the version tag, for example `v0.1.1`.
-4. Leave `prerelease` unchecked for a normal release.
+3. Set `tag` to an existing release tag, for example `v0.1.1`.
 
 The workflow checks out the tag, builds `cargo build -p rvl --release --locked`
 on Linux, macOS, and Windows, uploads workflow artifacts, and attaches the
