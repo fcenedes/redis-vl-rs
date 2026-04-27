@@ -1,8 +1,6 @@
 name: Release Please
 
 on:
-  push:
-    branches: ["main"]
   workflow_dispatch:
 
 permissions:
@@ -13,6 +11,9 @@ permissions:
 
 jobs:
   release-plz:
+    # This workflow is intentionally manual. Releasing is driven by pushing
+    # version tags in publish.yml, and GitHub disables Actions-created PRs
+    # unless the repository setting is explicitly enabled.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

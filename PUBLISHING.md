@@ -87,6 +87,9 @@ Use the manual `Publish` workflow in GitHub Actions only for dry-runs:
 
 `release-plz.yml` currently creates release PRs. Actual crate publication is
 driven by pushing version tags so normal PRs and pushes only run verification.
+The `release-plz` workflow is manual because GitHub blocks Actions-created pull
+requests unless Settings -> Actions -> General -> "Allow GitHub Actions to
+create and approve pull requests" is enabled.
 
 ## GitHub Release Binaries
 
