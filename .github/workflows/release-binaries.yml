@@ -65,7 +65,7 @@ jobs:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.artifact }}
       - name: Attach to GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.release.outputs.tag }}
           files: dist/${{ matrix.artifact }}
