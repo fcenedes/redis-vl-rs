@@ -31,7 +31,7 @@ thiserror.workspace = true
 tokio.workspace = true
 ulid.workspace = true
 url.workspace = true
-fastembed = { version = "5.13.0", optional = true }
+fastembed = { version = "5.13.4", optional = true }
 
 [features]
 default = ["openai", "litellm"]
@@ -57,7 +57,7 @@ workspace = true
 
 [dev-dependencies]
 criterion = { version = "0.8.2", features = ["html_reports"] }
-rand = "0.9"
+rand = "0.10"
 
 [[bench]]
 name = "core_benchmarks"
